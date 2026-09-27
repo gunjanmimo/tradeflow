@@ -1,0 +1,76 @@
+services:
+  hydradb:
+    # Agent memory layer: object-store-native graph DB, OpenCypher over Bolt + HTTP.
+    # Self-hosted so trade history and agent memory never leave this machine.
+    image: ghcr.io/hydra-db/hydradb:latest
+    container_name: tradeflow-hydradb
+    user: "1000:1000"
+    ports:
+      - "7687:7687"   # Bolt (neo4j-driver compatible)
+      - "8443:8443"   # HTTP query API
+      - "9090:9090"   # readiness + Prometheus metrics
+    volumes:
+      - ./hydradb-data:/data
+    environment:
+      CLOUD_PROVIDER: local
+      LOCAL_PATH: /data/store
+      GRAPH_NAMESPACE: default
+      GRAPH_ID: default
+      GRAPH_CELL_ID: cell-0
+      GRAPH_CELLS: cell-0
+      GRAPH_NODE_ID: node-0
+      GRAPH_BOLT_NODE_ADDRESSES: node-0=0.0.0.0:7687
+      GRAPH_ADVERTISED_BOLT_ADDR: hydradb:7687
+      GRAPH_DATA_CACHE_DIR: /data/cache
+      GRAPH_AUTH_TOKEN_FILE: /data/auth-token
+      GRAPH_ALLOW_PLAINTEXT: "true"
+      RUST_MIN_STACK: "33554432"
+    restart: unless-stopped
+    networks:
+      - tradeflow-net
+
+  backend:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: tradeflow-backend
+    env_file:
+      - ./api/.env
+    environment:
+      HYDRA_HTTP_URL: http://hydradb:8443
+      HYDRA_GRAPH_ID: default
+      HYDRA_NAMESPACE: default
+      HYDRA_CELL_ID: cell-0
+      HYDRA_AUTH_TOKEN_FILE: /hydra/auth-token
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./api:/app
+      - hf-cache:/root/.cache/huggingface
+      # read-only: the backend needs the token, not write access to the graph store
+      - ./hydradb-data/auth-token:/hydra/auth-token:ro
+    depends_on:
+      - hydradb
+    restart: unless-stopped
+    networks:
+      - tradeflow-net
+
+  frontend:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: tradeflow-frontend
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - tradeflow-net
+
+volumes:
+  hf-cache:
+
+networks:
+  tradeflow-net:
+    driver: bridge

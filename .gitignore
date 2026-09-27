@@ -1,0 +1,28 @@
+# Secrets - never commit
+api/.env
+.env
+hydradb-data/auth-token
+
+# Local graph store (agent memory data)
+hydradb-data/store/
+hydradb-data/cache/
+
+# Python
+__pycache__/
+*.pyc
+api/.venv/
+
+# Node
+node_modules/
+app/dist/
+
+# macOS AppleDouble resource forks
+._*
+.DS_Store
+
+# Any env files anywhere (keep examples)
+**/.env
+**/.env.*
+!**/.env.example
+*.pem
+*.key

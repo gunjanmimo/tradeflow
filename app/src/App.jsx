@@ -1,0 +1,1191 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { HugeiconsIcon } from '@hugeicons/react';
+import { 
+  Activity01Icon, 
+  OctagonAlertIcon, 
+  TrendingUpIcon, 
+  TrendingDownIcon, 
+  CoinsDollarIcon, 
+  PlayIcon, 
+  PauseIcon, 
+  PlusSignIcon, 
+  TrashIcon, 
+  FlashIcon, 
+  AiBrain01Icon, 
+  LayerIcon, 
+  UserGroupIcon, 
+  ShieldAlertIcon,
+  CheckmarkCircle01Icon,
+  ClockIcon,
+  Compass01Icon,
+  Refresh01Icon,
+  GlobeIcon,
+  Wallet01Icon,
+  Edit01Icon,
+  Cancel01Icon,
+  SlidersHorizontalIcon,
+  Robot01Icon,
+  Shield01Icon,
+  Building01Icon,
+  SmartPhone01Icon,
+  Comment01Icon,
+  LockIcon,
+  CircleDotIcon
+} from '@hugeicons/core-free-icons';
+
+// Official Hugeicons components
+const Activity = (props) => <HugeiconsIcon icon={Activity01Icon} size="1em" {...props} />;
+const AlertOctagon = (props) => <HugeiconsIcon icon={OctagonAlertIcon} size="1em" {...props} />;
+const TrendingUp = (props) => <HugeiconsIcon icon={TrendingUpIcon} size="1em" {...props} />;
+const TrendingDown = (props) => <HugeiconsIcon icon={TrendingDownIcon} size="1em" {...props} />;
+const DollarSign = (props) => <HugeiconsIcon icon={CoinsDollarIcon} size="1em" {...props} />;
+const Play = (props) => <HugeiconsIcon icon={PlayIcon} size="1em" {...props} />;
+const Pause = (props) => <HugeiconsIcon icon={PauseIcon} size="1em" {...props} />;
+const Plus = (props) => <HugeiconsIcon icon={PlusSignIcon} size="1em" {...props} />;
+const Trash2 = (props) => <HugeiconsIcon icon={TrashIcon} size="1em" {...props} />;
+const Zap = (props) => <HugeiconsIcon icon={FlashIcon} size="1em" {...props} />;
+const BrainCircuit = (props) => <HugeiconsIcon icon={AiBrain01Icon} size="1em" {...props} />;
+const Layers = (props) => <HugeiconsIcon icon={LayerIcon} size="1em" {...props} />;
+const Users = (props) => <HugeiconsIcon icon={UserGroupIcon} size="1em" {...props} />;
+const ShieldAlert = (props) => <HugeiconsIcon icon={ShieldAlertIcon} size="1em" {...props} />;
+const CheckCircle = (props) => <HugeiconsIcon icon={CheckmarkCircle01Icon} size="1em" {...props} />;
+const Clock = (props) => <HugeiconsIcon icon={ClockIcon} size="1em" {...props} />;
+const Compass = (props) => <HugeiconsIcon icon={Compass01Icon} size="1em" {...props} />;
+const RefreshCw = (props) => <HugeiconsIcon icon={Refresh01Icon} size="1em" {...props} />;
+const Globe = (props) => <HugeiconsIcon icon={GlobeIcon} size="1em" {...props} />;
+const Wallet = (props) => <HugeiconsIcon icon={Wallet01Icon} size="1em" {...props} />;
+const Edit3 = (props) => <HugeiconsIcon icon={Edit01Icon} size="1em" {...props} />;
+const X = (props) => <HugeiconsIcon icon={Cancel01Icon} size="1em" {...props} />;
+const Sliders = (props) => <HugeiconsIcon icon={SlidersHorizontalIcon} size="1em" {...props} />;
+const Bot = (props) => <HugeiconsIcon icon={Robot01Icon} size="1em" {...props} />;
+const Shield = (props) => <HugeiconsIcon icon={Shield01Icon} size="1em" {...props} />;
+const Building = (props) => <HugeiconsIcon icon={Building01Icon} size="1em" {...props} />;
+const SmartPhone = (props) => <HugeiconsIcon icon={SmartPhone01Icon} size="1em" {...props} />;
+const Comment = (props) => <HugeiconsIcon icon={Comment01Icon} size="1em" {...props} />;
+const Lock = (props) => <HugeiconsIcon icon={LockIcon} size="1em" {...props} />;
+const CircleDot = (props) => <HugeiconsIcon icon={CircleDotIcon} size="1em" {...props} />;
+
+const riskTone = (f) => (f <= 3 ? 'text-emerald-400' : f <= 6 ? 'text-amber-400' : 'text-rose-400');
+
+// Centered dialog with backdrop; closes on Escape or backdrop click
+function Modal({ title, icon, onClose, children }) {
+  useEffect(() => {
+    const onKey = (e) => e.key === 'Escape' && onClose();
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onMouseDown={onClose}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        className="w-full max-w-md rounded-2xl bg-[#0f1624] ring-1 ring-white/10 shadow-2xl shadow-black/50 p-6"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center gap-2">
+            {icon}
+            <h2 className="text-base font-semibold text-white">{title}</h2>
+          </div>
+          <button onClick={onClose} className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-white/5" aria-label="Close">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+const API_BASE = "http://localhost:8000";
+const WS_URL = "ws://localhost:8000/ws";
+
+export default function App() {
+  const [connected, setConnected] = useState(false);
+  const [telemetry, setTelemetry] = useState({
+    is_trading_active: false,
+    account: { equity: 100000, cash: 100000, buying_power: 200000 },
+    budget: { allocated_capital: 10000, total_position_exposure: 0, remaining_budget: 10000, utilization_pct: 0 },
+    positions: {},
+    watchlist: ["NVDA", "AAPL", "TSLA", "MSFT", "AMZN"],
+    latest_prices: {},
+    quant_metrics: {},
+    sentiment: {},
+    recent_decisions: [],
+    aggregated_trends: {},
+    market_clock: { is_us_market_open: false, is_eu_market_open: false, next_us_open: "09:30 AM EST" },
+    recent_trades: [],
+    logs: [],
+    risk: {
+      risk_factor: 4, risk_label: "Balanced (default)",
+      open_positions: 0, max_positions: 5,
+      total_notional: 0, total_risk_to_stops: 0, total_risk_pct_of_budget: 0,
+      realized_pnl_today: 0, daily_loss_pct: 0, daily_loss_limit_pct: 3,
+      drawdown_pct: 0, drawdown_limit_pct: 10, halt_reason: null,
+      positions: [], next_trade_preview: null
+    }
+  });
+
+  const [newSymbol, setNewSymbol] = useState("");
+  const [isSyncingTrends, setIsSyncingTrends] = useState(false);
+  const [assetFilter, setAssetFilter] = useState("ALL"); // "ALL", "STOCKS", "CRYPTO"
+  const [experts, setExperts] = useState([]);
+  
+  // Interactive Trading Budget Controls
+  const [isEditingBudget, setIsEditingBudget] = useState(false);
+  const [budgetInput, setBudgetInput] = useState("10000");
+  const [isSavingBudget, setIsSavingBudget] = useState(false);
+
+  // Portfolio risk dial (1-10). Held locally while dragging so the slider stays
+  // responsive, then reconciled from telemetry once the backend confirms.
+  const [riskFactor, setRiskFactor] = useState(4);
+  const [riskLevels, setRiskLevels] = useState({});
+  const [isSavingRisk, setIsSavingRisk] = useState(false);
+  const [riskDirty, setRiskDirty] = useState(false);
+  const [isRiskOpen, setIsRiskOpen] = useState(false);
+  const [riskDraft, setRiskDraft] = useState(4);
+
+  const wsRef = useRef(null);
+
+  const isCrypto = (sym) => sym.includes('/USD') || ['BTC', 'ETH', 'SOL'].includes(sym);
+
+  // Live portfolio risk from telemetry, and the limits for the dial position the
+  // user is currently looking at (which may lead telemetry by one round-trip).
+  const rp = telemetry.risk || {};
+  const lvl = riskLevels[riskFactor] || riskLevels[String(riskFactor)] || {};
+
+  const saveBudget = async (newVal) => {
+    const val = Number(newVal || budgetInput);
+    if (!val || val < 100) return;
+    setIsSavingBudget(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/budget`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ allocated_capital: val })
+      });
+      if (res.ok) {
+        setIsEditingBudget(false);
+      }
+    } catch (e) {
+      console.error("Failed to update budget:", e);
+    } finally {
+      setIsSavingBudget(false);
+    }
+  };
+
+  const saveRiskFactor = async (val) => {
+    const f = Math.max(1, Math.min(10, Number(val)));
+    setRiskFactor(f);
+    setRiskDirty(true);
+    setIsSavingRisk(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/risk-factor`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ risk_factor: f })
+      });
+      if (!res.ok) throw new Error(await res.text());
+    } catch (e) {
+      console.error("Failed to update risk factor:", e);
+    } finally {
+      setIsSavingRisk(false);
+      // Let telemetry take over again shortly after the write lands
+      setTimeout(() => setRiskDirty(false), 800);
+    }
+  };
+
+  // Load the level table once so the UI can describe each notch
+  useEffect(() => {
+    fetch(`${API_BASE}/api/risk-factor`)
+      .then(r => r.json())
+      .then(d => { setRiskLevels(d.levels || {}); setRiskFactor(d.risk_factor || 4); })
+      .catch(() => {});
+  }, []);
+
+  // Follow the backend unless the user is mid-adjustment
+  useEffect(() => {
+    if (!riskDirty && telemetry.risk?.risk_factor) {
+      setRiskFactor(telemetry.risk.risk_factor);
+    }
+  }, [telemetry.risk?.risk_factor, riskDirty]);
+
+  // Connect WebSocket
+  useEffect(() => {
+    let reconnectTimer;
+    function connect() {
+      const ws = new WebSocket(WS_URL);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        setConnected(true);
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          setTelemetry(data);
+        } catch (e) {
+          console.error("WS Parse error", e);
+        }
+      };
+
+      ws.onclose = () => {
+        setConnected(false);
+        reconnectTimer = setTimeout(connect, 1500);
+      };
+
+      ws.onerror = () => {
+        ws.close();
+      };
+    }
+
+    connect();
+
+    // Fetch experts
+    fetch(`${API_BASE}/api/experts`)
+      .then(res => res.json())
+      .then(data => setExperts(data.experts || []))
+      .catch(() => {});
+
+    return () => {
+      clearTimeout(reconnectTimer);
+      if (wsRef.current) wsRef.current.close();
+    };
+  }, []);
+
+  const toggleTrading = async () => {
+    try {
+      await fetch(`${API_BASE}/api/toggle-trading`, { method: "POST" });
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const triggerKillSwitch = async () => {
+    if (window.confirm("EMERGENCY KILL SWITCH: Close all positions and stop trading immediately?")) {
+      try {
+        await fetch(`${API_BASE}/api/kill-switch`, { method: "POST" });
+      } catch (e) {
+        console.error(e);
+      }
+    }
+  };
+
+  const triggerMorningSync = async () => {
+    setIsSyncingTrends(true);
+    try {
+      await fetch(`${API_BASE}/api/schedule/run-now?market=US`, { method: "POST" });
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsSyncingTrends(false);
+    }
+  };
+
+  const addWatchlist = async (e) => {
+    e.preventDefault();
+    if (!newSymbol) return;
+    try {
+      await fetch(`${API_BASE}/api/watchlist`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol: newSymbol })
+      });
+      setNewSymbol("");
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const removeWatchlist = async (sym) => {
+    try {
+      await fetch(`${API_BASE}/api/watchlist/${sym}`, { method: "DELETE" });
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const positionsList = Object.values(telemetry.positions || {}).map((p) => {
+    const livePrice = telemetry.latest_prices?.[p.symbol]?.price || telemetry.prices?.[p.symbol]?.price || p.current_price || p.avg_entry_price;
+    const qty = p.qty || 0;
+    const avg = p.avg_entry_price || livePrice;
+    const pnl = avg && qty ? (livePrice - avg) * qty : (p.unrealized_pl || 0);
+    const pnlpc = avg ? (livePrice - avg) / avg : (p.unrealized_plpc || 0);
+    const sentinel = telemetry.sentinel_bots?.[p.symbol];
+    return {
+      ...p,
+      current_price: livePrice,
+      unrealized_pl: pnl,
+      unrealized_plpc: pnlpc,
+      sentinel: sentinel,
+      buy_prob: sentinel?.buy_prob !== undefined ? sentinel.buy_prob : p.buy_prob,
+      sell_prob: sentinel?.sell_prob !== undefined ? sentinel.sell_prob : p.sell_prob,
+      close_prob: sentinel?.close_prob !== undefined ? sentinel.close_prob : p.close_prob,
+      stop_loss: sentinel?.stop_loss || p.stop_loss,
+      take_profit: sentinel?.take_profit || p.take_profit,
+      bot_thesis: sentinel?.thesis || p.bot_thesis
+    };
+  });
+  const totalPnL = positionsList.reduce((acc, p) => acc + (p.unrealized_pl || 0), 0);
+  const trendsList = Object.values(telemetry.aggregated_trends || {});
+  const clock = telemetry.market_clock || {};
+
+  return (
+    <div className="min-h-screen bg-[#090d16] text-slate-100 flex flex-col font-sans">
+      {/* Top Header */}
+      <header className="sticky top-0 z-50 border-b border-white/5 bg-[#0b111c]/80 backdrop-blur-xl">
+        <div className="px-6 h-16 flex items-center justify-between gap-4">
+          {/* Brand */}
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-emerald-500 to-cyan-500 flex items-center justify-center shadow-lg shadow-emerald-500/20 shrink-0">
+              <Zap className="w-5 h-5 text-slate-950 fill-current" />
+            </div>
+            <div className="min-w-0">
+              <h1 className="font-semibold text-lg leading-tight tracking-tight text-white">TradeFlow</h1>
+              <p className="hidden md:block text-[11px] text-slate-500 truncate">4-Pillar Consensus · Laya · Alpaca Sandbox</p>
+            </div>
+          </div>
+
+          {/* Market status: one pill that says whether stocks are trading, plus always-on crypto */}
+          {(() => {
+            const stocksLive = clock.is_us_market_open || clock.is_eu_market_open;
+            const venues = [clock.is_us_market_open && 'US', clock.is_eu_market_open && 'EU'].filter(Boolean).join(' + ');
+            return (
+              <div
+                className="hidden lg:flex items-center rounded-full bg-white/[0.03] ring-1 ring-white/10 text-xs font-medium"
+                title={stocksLive ? `Stock markets open: ${venues}` : `Stock markets closed · next US open: ${clock.next_us_open || '09:30 AM EST'}`}
+              >
+                <div className="flex items-center gap-2 pl-3 pr-3 py-1.5">
+                  <span className={`w-2 h-2 rounded-full ${stocksLive ? 'bg-emerald-400 animate-pulse shadow-[0_0_8px] shadow-emerald-400' : 'bg-slate-500'}`} />
+                  <span className="text-slate-400">Stocks</span>
+                  <span className={stocksLive ? 'text-emerald-300 font-semibold' : 'text-slate-300'}>
+                    {stocksLive ? `LIVE${venues ? ` · ${venues}` : ''}` : 'CLOSED'}
+                  </span>
+                </div>
+                <span className="w-px h-4 bg-white/10" />
+                <div className="flex items-center gap-2 pl-3 pr-3 py-1.5" title="Crypto trades 24/7">
+                  <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+                  <span className="text-slate-400">Crypto</span>
+                  <span className="text-cyan-300 font-semibold">24/7</span>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Right cluster: stat chips + actions */}
+          <div className="flex items-center gap-2">
+            <div className="hidden xl:flex flex-col items-end px-3">
+              <span className="text-[10px] uppercase tracking-wider text-slate-500">Broker equity</span>
+              <span className="text-sm font-mono text-slate-300">
+                ${(telemetry.account?.equity || 100000).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+              </span>
+            </div>
+
+            {/* Budget chip -> opens modal */}
+            <button
+              onClick={() => { setBudgetInput(String(telemetry.budget?.allocated_capital || 10000)); setIsEditingBudget(true); }}
+              className="group flex items-center gap-2.5 rounded-xl px-3 py-1.5 bg-white/[0.03] ring-1 ring-white/10 hover:ring-cyan-400/50 hover:bg-cyan-400/5 transition-all text-left"
+              title="Edit the capital the bot is allowed to trade"
+            >
+              <Wallet className="w-4 h-4 text-cyan-400" />
+              <div className="flex flex-col">
+                <span className="text-[10px] uppercase tracking-wider text-slate-500 leading-none">Budget</span>
+                <span className="text-sm font-mono font-semibold text-white leading-tight">
+                  ${(telemetry.budget?.allocated_capital || 10000).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                </span>
+                <div className="w-full h-0.5 bg-white/10 rounded-full overflow-hidden">
+                  <div style={{ width: `${Math.min(100, telemetry.budget?.utilization_pct || 0)}%` }} className="h-full bg-cyan-400 transition-all duration-300" />
+                </div>
+              </div>
+              <Edit3 className="w-3 h-3 text-slate-500 group-hover:text-cyan-300" />
+            </button>
+
+            {/* Risk chip -> opens modal */}
+            <button
+              onClick={() => { setRiskDraft(riskFactor); setIsRiskOpen(true); }}
+              className="group flex items-center gap-2.5 rounded-xl px-3 py-1.5 bg-white/[0.03] ring-1 ring-white/10 hover:ring-amber-400/50 hover:bg-amber-400/5 transition-all text-left"
+              title="Adjust portfolio-wide risk factor"
+            >
+              <Shield className={`w-4 h-4 ${rp.halt_reason ? 'text-rose-400' : 'text-amber-400'}`} />
+              <div className="flex flex-col">
+                <span className="text-[10px] uppercase tracking-wider text-slate-500 leading-none">Risk</span>
+                <span className="text-sm font-semibold leading-tight">
+                  <span className={`font-mono ${riskTone(riskFactor)}`}>{riskFactor}</span>
+                  <span className="text-slate-500 font-mono">/10</span>
+                  <span className="hidden 2xl:inline text-[11px] text-slate-400 font-normal ml-1.5">{rp.risk_label || ''}</span>
+                </span>
+              </div>
+              {rp.halt_reason && <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse" title={rp.halt_reason} />}
+              <Sliders className="w-3 h-3 text-slate-500 group-hover:text-amber-300" />
+            </button>
+
+            <div className="flex flex-col items-end px-3">
+              <span className="text-[10px] uppercase tracking-wider text-slate-500">Open PnL</span>
+              <span className={`text-sm font-mono font-semibold ${totalPnL >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                {totalPnL >= 0 ? '+' : ''}${totalPnL.toFixed(2)}
+              </span>
+            </div>
+
+            <span className="w-px h-8 bg-white/10 mx-1" />
+
+            {/* Actions */}
+            <button
+              onClick={triggerMorningSync}
+              disabled={isSyncingTrends}
+              className="w-9 h-9 flex items-center justify-center rounded-xl text-cyan-400 bg-white/[0.03] ring-1 ring-white/10 hover:ring-cyan-400/50 hover:bg-cyan-400/10 transition-all"
+              title="Morning Sync: SEC + eToro + Dub + StockTwits, scored with Laya"
+            >
+              <RefreshCw className={`w-4 h-4 ${isSyncingTrends ? 'animate-spin' : ''}`} />
+            </button>
+
+            <button
+              onClick={toggleTrading}
+              className={`flex items-center gap-2 h-9 px-3 rounded-xl text-xs font-semibold ring-1 transition-all ${
+                telemetry.is_trading_active
+                  ? 'bg-emerald-500/10 text-emerald-300 ring-emerald-500/30 hover:bg-emerald-500/20'
+                  : 'bg-amber-500/10 text-amber-300 ring-amber-500/30 hover:bg-amber-500/20'
+              }`}
+              title={telemetry.is_trading_active ? 'Pause the bot' : 'Resume the bot'}
+            >
+              {telemetry.is_trading_active ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
+              <span>{telemetry.is_trading_active ? 'Active' : 'Paused'}</span>
+            </button>
+
+            <button
+              onClick={triggerKillSwitch}
+              className="flex items-center gap-1.5 h-9 px-3 rounded-xl text-xs font-bold bg-rose-600/15 text-rose-300 ring-1 ring-rose-500/40 hover:bg-rose-600 hover:text-white transition-all"
+              title="Close all positions and halt trading immediately"
+            >
+              <AlertOctagon className="w-4 h-4" />
+              <span className="hidden md:inline">Kill</span>
+            </button>
+
+            <span
+              className={`ml-1 w-2 h-2 rounded-full ${connected ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`}
+              title={connected ? 'Live feed connected (4Hz)' : 'Live feed disconnected'}
+            />
+          </div>
+        </div>
+      </header>
+
+      {/* Budget modal */}
+      {isEditingBudget && (
+        <Modal onClose={() => setIsEditingBudget(false)} title="Bot budget cap" icon={<Wallet className="w-4 h-4 text-cyan-400" />}>
+          <p className="text-xs text-slate-400 mb-4">The maximum capital the bot may deploy across all positions.</p>
+
+          <div className="grid grid-cols-3 gap-2 mb-5 text-center">
+            {[
+              ['Current cap', `$${(telemetry.budget?.allocated_capital || 10000).toLocaleString(undefined, { maximumFractionDigits: 0 })}`, 'text-white'],
+              ['In use', `$${(telemetry.budget?.total_position_exposure || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}`, 'text-cyan-300'],
+              ['Utilization', `${telemetry.budget?.utilization_pct || 0}%`, 'text-slate-200'],
+            ].map(([k, v, c]) => (
+              <div key={k} className="rounded-xl bg-white/[0.03] ring-1 ring-white/10 py-2">
+                <div className="text-[10px] uppercase tracking-wider text-slate-500">{k}</div>
+                <div className={`font-mono text-sm font-semibold ${c}`}>{v}</div>
+              </div>
+            ))}
+          </div>
+
+          <form onSubmit={(e) => { e.preventDefault(); saveBudget(budgetInput); }}>
+            <label className="text-[11px] uppercase tracking-wider text-slate-500">New cap</label>
+            <div className="mt-1.5 flex items-center rounded-xl bg-slate-950 ring-1 ring-white/10 focus-within:ring-cyan-400/60 px-3">
+              <span className="text-slate-500 font-mono">$</span>
+              <input
+                autoFocus
+                type="number"
+                min="100"
+                value={budgetInput}
+                onChange={(e) => setBudgetInput(e.target.value)}
+                className="flex-1 bg-transparent px-2 py-2.5 font-mono text-lg text-white focus:outline-none"
+                placeholder="10000"
+              />
+            </div>
+            <div className="flex gap-2 mt-2">
+              {[2000, 5000, 10000, 25000].map(amt => (
+                <button
+                  type="button"
+                  key={amt}
+                  onClick={() => setBudgetInput(String(amt))}
+                  className={`flex-1 text-xs font-mono py-1.5 rounded-lg ring-1 transition-all ${
+                    Number(budgetInput) === amt ? 'bg-cyan-400/15 text-cyan-200 ring-cyan-400/50' : 'bg-white/[0.03] text-slate-300 ring-white/10 hover:ring-white/20'
+                  }`}
+                >
+                  ${amt / 1000}k
+                </button>
+              ))}
+            </div>
+            {Number(budgetInput) > 0 && Number(budgetInput) < 100 && (
+              <p className="text-[11px] text-rose-300 mt-2">Minimum budget is $100.</p>
+            )}
+
+            <div className="flex justify-end gap-2 mt-6">
+              <button type="button" onClick={() => setIsEditingBudget(false)} className="px-4 py-2 rounded-xl text-sm text-slate-300 hover:bg-white/5">
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={isSavingBudget || !(Number(budgetInput) >= 100)}
+                className="px-4 py-2 rounded-xl text-sm font-semibold bg-cyan-400 text-slate-950 hover:bg-cyan-300 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {isSavingBudget ? 'Saving…' : 'Save budget'}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {/* Risk modal */}
+      {isRiskOpen && (() => {
+        const d = riskLevels[riskDraft] || riskLevels[String(riskDraft)] || {};
+        const changed = riskDraft !== riskFactor;
+        return (
+          <Modal onClose={() => setIsRiskOpen(false)} title="Portfolio risk" icon={<Shield className="w-4 h-4 text-amber-400" />}>
+            <p className="text-xs text-slate-400 mb-4">Scales position size, position count, loss limits and entry strictness across the whole portfolio.</p>
+
+            <div className="flex items-end justify-between mb-2">
+              <div>
+                <div className={`text-4xl font-mono font-bold ${riskTone(riskDraft)}`}>
+                  {riskDraft}<span className="text-lg text-slate-600">/10</span>
+                </div>
+                <div className="text-sm text-slate-300">{d.label || ''}</div>
+              </div>
+              {changed && <span className="text-[11px] text-amber-300 font-mono">was {riskFactor}</span>}
+            </div>
+
+            <input
+              type="range"
+              min="1" max="10" step="1"
+              value={riskDraft}
+              onChange={(e) => setRiskDraft(Number(e.target.value))}
+              className="w-full accent-amber-400 cursor-pointer"
+            />
+            <div className="flex justify-between text-[10px] font-mono text-slate-500 mt-1">
+              <span>1 · Preserve</span>
+              <span className="text-cyan-400">4 · Default</span>
+              <span>10 · Aggressive</span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 mt-5">
+              {[
+                ['Risk / trade', `${d.risk_per_trade_pct ?? '-'}% of budget`],
+                ['Max position', `${d.max_position_notional_pct ?? '-'}%`],
+                ['Positions', `${rp.open_positions ?? 0} / ${d.max_concurrent_positions ?? '-'}`],
+                ['Daily halt', `${(rp.daily_loss_pct || 0).toFixed(2)}% / ${d.max_daily_loss_pct ?? '-'}%`],
+                ['Entry bar', `buy_prob ≥ ${d.min_buy_prob ?? '-'}`],
+                ['At risk now', `$${(rp.total_risk_to_stops || 0).toFixed(2)} (${(rp.total_risk_pct_of_budget || 0).toFixed(2)}%)`,
+                  (rp.total_risk_pct_of_budget || 0) > (d.max_daily_loss_pct || 3) ? 'text-rose-300' : 'text-emerald-300'],
+              ].map(([k, v, c]) => (
+                <div key={k} className="rounded-xl bg-white/[0.03] ring-1 ring-white/10 px-3 py-2">
+                  <div className="text-[10px] uppercase tracking-wider text-slate-500">{k}</div>
+                  <div className={`font-mono text-sm ${c || 'text-slate-200'}`}>{v}</div>
+                </div>
+              ))}
+            </div>
+
+            {rp.next_trade_preview && !changed && (
+              <div className="mt-3 text-[11px] font-mono text-slate-400 leading-relaxed">
+                Next trade <span className="text-cyan-300">${(rp.next_trade_preview.position_notional || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}</span> notional,
+                risking <span className="text-rose-300">${(rp.next_trade_preview.actual_risk_dollars || 0).toFixed(2)}</span> @ {(rp.next_trade_preview.stop_pct || 0).toFixed(2)}% stop · R:R <span className="text-emerald-300">{rp.next_trade_preview.reward_risk_ratio}</span>
+              </div>
+            )}
+
+            {rp.halt_reason && (
+              <div className="mt-3 rounded-xl bg-rose-500/10 ring-1 ring-rose-500/30 px-3 py-2 text-xs text-rose-200">⚠ {rp.halt_reason}</div>
+            )}
+
+            <div className="flex justify-end gap-2 mt-6">
+              <button onClick={() => setIsRiskOpen(false)} className="px-4 py-2 rounded-xl text-sm text-slate-300 hover:bg-white/5">
+                Cancel
+              </button>
+              <button
+                onClick={async () => { await saveRiskFactor(riskDraft); setIsRiskOpen(false); }}
+                disabled={!changed || isSavingRisk}
+                className="px-4 py-2 rounded-xl text-sm font-semibold bg-amber-400 text-slate-950 hover:bg-amber-300 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {isSavingRisk ? 'Applying…' : 'Apply'}
+              </button>
+            </div>
+          </Modal>
+        );
+      })()}
+
+      {/* Main Grid Body */}
+      <main className="flex-1 p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+        
+        {/* Left Column: Watchlist & 4-Pillar Intelligence (7 Cols) */}
+        <section className="lg:col-span-7 flex flex-col space-y-6">
+
+          {/* NEW CARD: 4-Pillar Market Intelligence (SEC + eToro + Dub + StockTwits) */}
+          <div className="bg-[#0f172a]/70 border border-cyan-900/40 rounded-2xl p-5 shadow-xl relative overflow-hidden">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center space-x-2">
+                <Compass className="w-5 h-5 text-cyan-400" />
+                <h2 className="font-semibold text-base text-slate-100">
+                  4-Pillar Consensus Engine (SEC + eToro + Dub + StockTwits)
+                </h2>
+              </div>
+              <span className="text-[10px] px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 font-mono">
+                WEIGHTED CONSENSUS
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 font-mono">
+              {trendsList.map((t) => {
+                const score = t.consensus_score || 0.5;
+                const isStrongBull = t.sentiment_bias === 'STRONG_BULL';
+                const isBull = t.sentiment_bias === 'BULL';
+                const isDivergent = t.sentiment_bias === 'DIVERGENT';
+
+                return (
+                  <div key={t.symbol} className="bg-slate-900/90 border border-slate-800 rounded-xl p-3 flex flex-col justify-between">
+                    <div>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <div className="flex items-center space-x-2">
+                          <span className="font-bold text-sm text-slate-100">{t.symbol}</span>
+                          <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                            isStrongBull ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' :
+                            isBull ? 'bg-cyan-500/20 text-cyan-400' :
+                            isDivergent ? 'bg-amber-500/20 text-amber-400' :
+                            'bg-slate-800 text-slate-400'
+                          }`}>
+                            {t.sentiment_bias}
+                          </span>
+                        </div>
+                        <span className="text-xs font-bold text-emerald-400">
+                          {(score * 100).toFixed(0)}% Score
+                        </span>
+                      </div>
+
+                      {/* 4 Pillar Signals Icons */}
+                      <div className="flex flex-wrap gap-1.5 mb-2 text-[10px]">
+                        {t.signals?.sec && (
+                          <span className="px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-300 border border-blue-500/20 inline-flex items-center space-x-1" title={t.signals.sec.details}>
+                            <Building className="w-3 h-3 text-blue-400" />
+                            <span>SEC Form 4</span>
+                          </span>
+                        )}
+                        {t.signals?.etoro && (
+                          <span className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 inline-flex items-center space-x-1" title={t.signals.etoro.details}>
+                            <Users className="w-3 h-3 text-emerald-400" />
+                            <span>eToro Copy</span>
+                          </span>
+                        )}
+                        {t.signals?.dub && (
+                          <span className="px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-300 border border-purple-500/20 inline-flex items-center space-x-1" title={t.signals.dub.details}>
+                            <SmartPhone className="w-3 h-3 text-purple-400" />
+                            <span>Dub/Public</span>
+                          </span>
+                        )}
+                        {t.signals?.stocktwits && (
+                          <span className="px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20 inline-flex items-center space-x-1" title={t.signals.stocktwits.details}>
+                            <Comment className="w-3 h-3 text-amber-400" />
+                            <span>StockTwits</span>
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <p className="text-[10px] text-slate-400 line-clamp-2 italic font-sans">
+                      {t.thesis}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          
+          {/* Card: Watchlist & Sub-Second Evaluation */}
+          <div className="bg-[#0f172a]/70 border border-slate-800 rounded-2xl p-5 shadow-xl">
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+              <div className="flex items-center space-x-2">
+                <BrainCircuit className="w-5 h-5 text-cyan-400" />
+                <h2 className="font-semibold text-base text-slate-100">Dynamic Watchlist & Quant Matrix</h2>
+              </div>
+
+              {/* Asset Filter Tabs */}
+              <div className="flex items-center bg-slate-900 border border-slate-800 rounded-lg p-0.5 text-[11px] font-mono">
+                <button
+                  onClick={() => setAssetFilter("ALL")}
+                  className={`px-2.5 py-1 rounded-md transition-all ${assetFilter === "ALL" ? "bg-cyan-500 text-slate-950 font-bold" : "text-slate-400 hover:text-white"}`}
+                >
+                  ALL
+                </button>
+                <button
+                  onClick={() => setAssetFilter("STOCKS")}
+                  className={`px-2.5 py-1 rounded-md transition-all ${assetFilter === "STOCKS" ? "bg-cyan-500 text-slate-950 font-bold" : "text-slate-400 hover:text-white"}`}
+                >
+                  STOCKS
+                </button>
+                <button
+                  onClick={() => setAssetFilter("CRYPTO")}
+                  className={`px-2.5 py-1 rounded-md transition-all ${assetFilter === "CRYPTO" ? "bg-cyan-500 text-slate-950 font-bold" : "text-slate-400 hover:text-white"}`}
+                >
+                  CRYPTO (24/7)
+                </button>
+              </div>
+              
+              {/* Add ticker form */}
+              <form onSubmit={addWatchlist} className="flex items-center space-x-2">
+                <input
+                  type="text"
+                  placeholder="ADD TICKER (e.g. SOL/USD)"
+                  value={newSymbol}
+                  onChange={(e) => setNewSymbol(e.target.value)}
+                  className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs uppercase font-mono text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyan-500"
+                />
+                <button
+                  type="submit"
+                  className="bg-cyan-500 hover:bg-cyan-400 text-slate-950 p-1.5 rounded-lg transition-colors"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                </button>
+              </form>
+            </div>
+
+            {/* Watchlist Table */}
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="border-b border-slate-800 text-slate-400 font-medium">
+                    <th className="pb-2.5">SYMBOL</th>
+                    <th className="pb-2.5">PRICE</th>
+                    <th className="pb-2.5">LAYA SENTIMENT</th>
+                    <th className="pb-2.5">QUANT (RSI / EMA)</th>
+                    <th className="pb-2.5">TRIGGER</th>
+                    <th className="pb-2.5 text-right">ACTION</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60 font-mono">
+                  {(telemetry.watchlist || [])
+                    .filter((sym) => {
+                      if (assetFilter === "STOCKS") return !isCrypto(sym);
+                      if (assetFilter === "CRYPTO") return isCrypto(sym);
+                      return true;
+                    })
+                    .map((sym) => {
+                    const tick = telemetry.latest_prices?.[sym];
+                    const quant = telemetry.quant_metrics?.[sym];
+                    const sentiment = telemetry.sentiment?.[sym];
+                    const isHolding = !!telemetry.positions?.[sym];
+                    const isCryptoPair = isCrypto(sym);
+
+                    const posProb = sentiment?.pos_prob ?? 0.5;
+                    const negProb = sentiment?.neg_prob ?? 0.5;
+
+                    return (
+                      <tr key={sym} className="hover:bg-slate-800/20 transition-colors">
+                        <td className="py-3 font-bold text-slate-200 flex items-center space-x-1.5">
+                          <span>{sym}</span>
+                          <span className={`text-[9px] px-1 rounded border font-mono ${
+                            isCryptoPair ? 'bg-purple-500/10 text-purple-300 border-purple-500/20' : 'bg-blue-500/10 text-blue-300 border-blue-500/20'
+                          }`}>
+                            {isCryptoPair ? '24/7' : 'STOCK'}
+                          </span>
+                          {isHolding && (
+                            <span className="text-[9px] bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-1 rounded">
+                              HELD
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-3 font-semibold text-slate-100">
+                          {tick ? `$${tick.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '--'}
+                        </td>
+                        <td className="py-3">
+                          <div className="flex flex-col space-y-1 w-28">
+                            <div className="flex justify-between text-[10px] text-slate-400">
+                              <span className="text-emerald-400 font-bold">{(posProb * 100).toFixed(0)}% Bull</span>
+                              <span className="text-rose-400 font-bold">{(negProb * 100).toFixed(0)}% Bear</span>
+                            </div>
+                            <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden flex">
+                              <div style={{ width: `${posProb * 100}%` }} className="bg-emerald-500" />
+                              <div style={{ width: `${negProb * 100}%` }} className="bg-rose-500" />
+                            </div>
+                          </div>
+                        </td>
+                        <td className="py-3">
+                          <div className="flex items-center space-x-2">
+                            <span className={`px-1.5 py-0.5 rounded text-[10px] ${
+                              quant?.rsi < 35 ? 'bg-emerald-500/20 text-emerald-400 font-bold' :
+                              quant?.rsi > 70 ? 'bg-rose-500/20 text-rose-400 font-bold' :
+                              'bg-slate-800 text-slate-300'
+                            }`}>
+                              RSI {quant?.rsi ? quant.rsi.toFixed(1) : '--'}
+                            </span>
+                            <span className="text-[10px] text-slate-400">
+                              {quant?.ema_fast && quant?.ema_slow ? (
+                                quant.ema_fast > quant.ema_slow ? (
+                                  <span className="inline-flex items-center space-x-1 text-emerald-400 font-semibold">
+                                    <CircleDot className="w-2.5 h-2.5 text-emerald-400" />
+                                    <span>Bull EMA</span>
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center space-x-1 text-rose-400 font-semibold">
+                                    <CircleDot className="w-2.5 h-2.5 text-rose-400" />
+                                    <span>Bear EMA</span>
+                                  </span>
+                                )
+                              ) : '--'}
+                            </span>
+                          </div>
+                        </td>
+                        <td className="py-3">
+                          {isHolding ? (
+                            <span className="px-2 py-0.5 rounded text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/20 font-bold">
+                              HOLDING
+                            </span>
+                          ) : posProb >= 0.65 ? (
+                            <span className="px-2 py-0.5 rounded text-[10px] bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 font-bold animate-pulse">
+                              READY BUY
+                            </span>
+                          ) : (
+                            <span className="text-slate-500 text-[10px]">SCANNING</span>
+                          )}
+                        </td>
+                        <td className="py-3 text-right">
+                          <button
+                            onClick={() => removeWatchlist(sym)}
+                            className="text-slate-500 hover:text-rose-400 transition-colors p-1"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+        </section>
+
+        {/* Right Column: Positions, Real-time Trades & Live Logs (5 Cols) */}
+        <section className="lg:col-span-5 flex flex-col space-y-6">
+          
+          {/* Active Positions Card */}
+          <div className="bg-[#0f172a]/70 border border-slate-800 rounded-2xl p-5 shadow-xl">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center space-x-2">
+                <Layers className="w-5 h-5 text-emerald-400" />
+                <h3 className="font-semibold text-base text-slate-100">
+                  Active Positions ({positionsList.length})
+                </h3>
+              </div>
+              <span className="text-xs text-slate-400 font-mono">Max: {rp.max_positions ?? lvl.max_concurrent_positions ?? 5}</span>
+            </div>
+
+            {/* Capital Budget Utilization Bar */}
+            <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-2.5 mb-3 text-xs font-mono">
+              <div className="flex justify-between text-[11px] text-slate-400 mb-1">
+                <span>Budget Exposure: <strong className="text-cyan-300">${(telemetry.budget?.total_position_exposure || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong> / ${(telemetry.budget?.allocated_capital || 10000).toLocaleString()}</span>
+                <span className="text-emerald-400 font-bold">${(telemetry.budget?.remaining_budget || 10000).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} Avail</span>
+              </div>
+              <div className="w-full h-1.5 bg-slate-950 rounded-full overflow-hidden flex">
+                <div 
+                  style={{ width: `${Math.min(100, telemetry.budget?.utilization_pct || 0)}%` }} 
+                  className={`transition-all duration-300 ${
+                    (telemetry.budget?.utilization_pct || 0) > 85 ? 'bg-amber-400' : 'bg-cyan-400'
+                  }`}
+                />
+              </div>
+            </div>
+
+            {positionsList.length === 0 ? (
+              <div className="py-8 text-center text-slate-500 text-xs">
+                No open positions. Quant bot is scanning market ticks for breakout triggers.
+              </div>
+            ) : (
+              <div className="space-y-3 font-mono">
+                {positionsList.map((pos) => {
+                  const pnl = pos.unrealized_pl || 0;
+                  const pnlColor = pnl >= 0 ? 'text-emerald-400' : 'text-rose-400';
+                  
+                  // Real-time model probabilities (0-100)
+                  const buyPct = Math.min(100, Math.max(0, Math.round((pos.buy_prob !== undefined ? pos.buy_prob : (pos.laya_pos || 0.65)) * 100)));
+                  const sellPct = Math.min(100, Math.max(0, Math.round((pos.sell_prob !== undefined ? pos.sell_prob : (pos.laya_neg || 0.15)) * 100)));
+                  const closePct = Math.min(100, Math.max(0, Math.round((pos.close_prob !== undefined ? pos.close_prob : 0.08) * 100)));
+
+                  return (
+                    <div key={pos.symbol} className="bg-slate-900 border border-slate-800 rounded-xl p-3.5 flex flex-col space-y-3 shadow-md">
+                      {/* Micro-Agent Header: Dedicated Sentinel Bot for this position */}
+                      <div className="flex items-center justify-between bg-slate-950/80 border border-emerald-500/25 rounded-lg px-2.5 py-1.5 font-mono text-[11px]">
+                        <div className="flex items-center space-x-2">
+                          <div className="relative flex items-center justify-center">
+                            <Bot className="w-3.5 h-3.5 text-emerald-400" />
+                            <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 bg-emerald-400 rounded-full animate-ping" />
+                          </div>
+                          <span className="font-bold text-emerald-300">
+                            {pos.sentinel?.bot_id || pos.bot_id || `BOT-${pos.symbol.replace('/', '')}`}
+                          </span>
+                          <span className="text-[9px] px-1.5 py-0.2 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded font-sans font-semibold">
+                            DEDICATED SENTINEL
+                          </span>
+                        </div>
+                        <div className="flex items-center space-x-2 text-[10px] text-slate-400">
+                          <span className="flex items-center space-x-1">
+                            <Activity className="w-3 h-3 text-cyan-400 animate-spin" />
+                            <span>{pos.sentinel?.evaluations_count || 1} ticks</span>
+                          </span>
+                          {pos.sentinel?.highest_price && pos.sentinel.highest_price > pos.sentinel.entry_price * 1.008 && (
+                            <span className="text-[9px] px-1.5 py-0.5 bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 rounded font-bold inline-flex items-center space-x-1">
+                              <Lock className="w-2.5 h-2.5 text-cyan-300" />
+                              <span>TRAILING SL</span>
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Top Row: Symbol, shares, entry price, live price, and real-time Open PnL */}
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <div className="flex items-center space-x-2">
+                            <span className="font-bold text-sm text-slate-100">{pos.symbol}</span>
+                            <span className="text-xs text-slate-400 font-mono">{pos.qty} shares</span>
+                            {pos.mode && (
+                              <span className={`text-[9px] px-1.5 py-0.5 rounded font-sans font-semibold ${
+                                pos.mode.includes('ALPACA') 
+                                  ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20' 
+                                  : 'bg-purple-500/10 text-purple-400 border border-purple-500/20'
+                              }`}>
+                                {pos.mode.replace('_', ' ')}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[11px] text-slate-400 mt-1 font-mono">
+                            Avg: ${pos.avg_entry_price?.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: (pos.avg_entry_price < 1 ? 6 : 2) })} → Now: <strong className="text-cyan-300 font-bold">${pos.current_price?.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: (pos.current_price < 1 ? 6 : 2) })}</strong>
+                          </div>
+                          {pos.stop_loss && (
+                            <div className="text-[10px] text-slate-400 mt-0.5 font-mono flex items-center space-x-2">
+                              <span>SL: <strong className="text-rose-400">${pos.stop_loss}</strong></span>
+                              <span>|</span>
+                              <span>TP: <strong className="text-emerald-400">${pos.take_profit}</strong></span>
+                              {pos.sentinel?.highest_price && (
+                                <>
+                                  <span>|</span>
+                                  <span className="text-slate-500">High: ${pos.sentinel.highest_price.toFixed(2)}</span>
+                                </>
+                              )}
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="text-right font-mono">
+                          <div className="flex items-center justify-end space-x-1">
+                            <span className={`text-base font-bold ${pnlColor}`}>
+                              {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
+                            </span>
+                          </div>
+                          <div className="text-[11px]">
+                            <span className={pnlColor}>
+                              {pos.unrealized_plpc ? `${pos.unrealized_plpc >= 0 ? '+' : ''}${(pos.unrealized_plpc * 100).toFixed(2)}%` : '0.00%'}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Three Bars: BUY, SELL, CLOSE Real-time Probabilities out of 100 */}
+                      <div className="pt-2 border-t border-slate-800/80">
+                        <div className="text-[10px] text-slate-400 mb-1.5 flex items-center justify-between font-sans">
+                          <span className="flex items-center space-x-1.5 font-semibold text-slate-300">
+                            <BrainCircuit className="w-3.5 h-3.5 text-cyan-400 animate-pulse" />
+                            <span>Laya Model Thinking & Signal Matrix</span>
+                          </span>
+                          <span className="text-[9px] text-slate-500 font-mono">Real-time / 100</span>
+                        </div>
+
+                        <div className="grid grid-cols-3 gap-2 text-[10px] font-mono">
+                          {/* BUY Probability Bar */}
+                          <div className="bg-slate-950/70 border border-slate-800/80 rounded-lg p-2 flex flex-col justify-between">
+                            <div className="flex justify-between items-center mb-1.5">
+                              <span className="text-emerald-400 font-bold flex items-center space-x-1">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                                <span>BUY</span>
+                              </span>
+                              <span className="font-bold text-slate-200">{buyPct} <span className="text-slate-500 text-[9px]">/ 100</span></span>
+                            </div>
+                            <div className="w-full h-1.5 bg-slate-800/80 rounded-full overflow-hidden">
+                              <div 
+                                style={{ width: `${buyPct}%` }}
+                                className="h-full bg-emerald-400 transition-all duration-300 rounded-full shadow-[0_0_8px_rgba(52,211,153,0.5)]"
+                              />
+                            </div>
+                            <span className="text-[9px] text-slate-500 mt-1 font-sans">Momentum Buy</span>
+                          </div>
+
+                          {/* SELL Probability Bar */}
+                          <div className="bg-slate-950/70 border border-slate-800/80 rounded-lg p-2 flex flex-col justify-between">
+                            <div className="flex justify-between items-center mb-1.5">
+                              <span className="text-amber-400 font-bold flex items-center space-x-1">
+                                <span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
+                                <span>SELL</span>
+                              </span>
+                              <span className="font-bold text-slate-200">{sellPct} <span className="text-slate-500 text-[9px]">/ 100</span></span>
+                            </div>
+                            <div className="w-full h-1.5 bg-slate-800/80 rounded-full overflow-hidden">
+                              <div 
+                                style={{ width: `${sellPct}%` }}
+                                className="h-full bg-amber-400 transition-all duration-300 rounded-full shadow-[0_0_8px_rgba(251,191,36,0.5)]"
+                              />
+                            </div>
+                            <span className="text-[9px] text-slate-500 mt-1 font-sans">Bearish Fading</span>
+                          </div>
+
+                          {/* CLOSE Probability Bar */}
+                          <div className="bg-slate-950/70 border border-slate-800/80 rounded-lg p-2 flex flex-col justify-between">
+                            <div className="flex justify-between items-center mb-1.5">
+                              <span className="text-rose-400 font-bold flex items-center space-x-1">
+                                <span className="w-1.5 h-1.5 rounded-full bg-rose-400"></span>
+                                <span>CLOSE</span>
+                              </span>
+                              <span className="font-bold text-slate-200">{closePct} <span className="text-slate-500 text-[9px]">/ 100</span></span>
+                            </div>
+                            <div className="w-full h-1.5 bg-slate-800/80 rounded-full overflow-hidden">
+                              <div 
+                                style={{ width: `${closePct}%` }}
+                                className="h-full bg-rose-400 transition-all duration-300 rounded-full shadow-[0_0_8px_rgba(244,63,94,0.5)]"
+                              />
+                            </div>
+                            <span className="text-[9px] text-slate-500 mt-1 font-sans">SL / TP Exit</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Bot Sizing Intelligence: BUY Investment Sizing & SELL Divestment Strategy */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[10px] font-mono">
+                        {/* BUY Sizing */}
+                        <div className="bg-slate-950/70 border border-emerald-900/40 rounded-lg p-2 flex flex-col justify-between">
+                          <div className="flex items-center justify-between text-slate-400 mb-1">
+                            <span className="text-emerald-400 font-bold flex items-center space-x-1.5">
+                              <DollarSign className="w-3.5 h-3.5 text-emerald-400" />
+                              <span>BUY SIZING</span>
+                            </span>
+                            <span className="text-emerald-300 font-bold">
+                              ${(pos.invested_dollars || (pos.qty * pos.avg_entry_price) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between text-[9px] text-slate-400 border-t border-slate-800/60 pt-1">
+                            <span>Budget Allocation:</span>
+                            <span className="text-cyan-300 font-semibold">{pos.allocated_pct || ((pos.invested_dollars / (telemetry.budget?.allocated_capital || 10000)) * 100).toFixed(1)}%</span>
+                          </div>
+                          <div className="flex items-center justify-between text-[9px] text-slate-400 mt-0.5">
+                            <span>Risk / Reward:</span>
+                            <span>
+                              <strong className="text-rose-400">-${(pos.dollar_risk || 0).toFixed(2)}</strong> / <strong className="text-emerald-400">+${(pos.dollar_reward || 0).toFixed(2)}</strong>
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* SELL Sizing */}
+                        <div className="bg-slate-950/70 border border-amber-900/40 rounded-lg p-2 flex flex-col justify-between">
+                          <div className="flex items-center justify-between text-slate-400 mb-1">
+                            <span className="text-amber-400 font-bold flex items-center space-x-1.5">
+                              <TrendingDown className="w-3.5 h-3.5 text-amber-400" />
+                              <span>SELL SIZING</span>
+                            </span>
+                            <span className="text-amber-300 font-bold">
+                              {pos.sell_pct || 100}% ({pos.sell_qty || pos.qty}x)
+                            </span>
+                          </div>
+                          <div className="text-[9px] text-slate-300 border-t border-slate-800/60 pt-1 leading-tight font-sans">
+                            <span className="text-slate-400 font-mono">Plan: </span>
+                            <span className="text-amber-200/90 font-medium">
+                              {pos.sell_plan || `Liquidate 100% on SL $${pos.stop_loss} or TP $${pos.take_profit}`}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Sentinel Bot Directive & Live Thesis */}
+                      <div className="bg-slate-950/60 border border-slate-800/70 rounded-lg p-2 text-[10px] text-slate-300 flex items-start space-x-2">
+                        <span className="text-cyan-400 font-bold shrink-0 mt-0.5">DIRECTIVE:</span>
+                        <span className="font-sans leading-relaxed text-slate-300">
+                          {pos.bot_thesis || pos.sentinel?.thesis || `Assigned dedicated bot continuously supervising ${pos.symbol} order flow, Laya sentiment, and trailing stops for autonomous exit booking.`}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Recent Automated Orders Card */}
+          <div className="bg-[#0f172a]/70 border border-slate-800 rounded-2xl p-5 shadow-xl flex flex-col">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center space-x-2">
+                <Clock className="w-4 h-4 text-cyan-400" />
+                <h3 className="font-semibold text-sm text-slate-200">Recent Automated Fills & Signals</h3>
+              </div>
+              <span className="text-[11px] text-slate-500 font-mono">
+                {(telemetry.recent_trades || []).length} recorded
+              </span>
+            </div>
+
+            <div className="space-y-2 max-h-[380px] overflow-y-auto pr-1 font-mono text-xs">
+              {(telemetry.recent_trades || []).length === 0 ? (
+                <div className="text-slate-500 text-xs py-10 text-center">No trades placed yet.</div>
+              ) : (
+                [...telemetry.recent_trades].reverse().map((tr, idx) => (
+                  <div key={idx} className="bg-slate-900/90 border border-slate-800 rounded-lg p-2.5 flex items-center justify-between hover:border-slate-700/80 transition-colors">
+                    <div className="flex items-center space-x-2">
+                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                        tr.side === 'BUY' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'
+                      }`}>
+                        {tr.side}
+                      </span>
+                      <span className="font-bold text-slate-200">{tr.symbol}</span>
+                      <span className="text-slate-400 text-[11px]">{tr.qty}x @ ${tr.price?.toFixed(2)}</span>
+                    </div>
+                    <div className="flex items-center space-x-2 text-right text-[10px]">
+                      {tr.time && (
+                        <span className="text-slate-500 font-mono">
+                          {new Date(tr.time * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                        </span>
+                      )}
+                      {tr.pnl !== undefined ? (
+                        <span className={tr.pnl >= 0 ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+                          PnL: {tr.pnl >= 0 ? '+' : ''}${tr.pnl.toFixed(2)}
+                        </span>
+                      ) : (
+                        <span className="text-slate-500 font-mono">{tr.mode || 'ALPACA_PAPER'}</span>
+                      )}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          {/* Real-time Engine Event Logs */}
+          <div className="bg-[#0f172a]/70 border border-slate-800 rounded-2xl p-4 shadow-xl">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Engine Micro-Logs</span>
+              <span className="text-[10px] text-slate-500 font-mono">Live WebSocket</span>
+            </div>
+            <div className="h-44 overflow-y-auto font-mono text-[10px] space-y-1.5 bg-slate-950 p-2.5 rounded-lg border border-slate-900">
+              {(telemetry.logs || []).slice(-20).reverse().map((log, i) => (
+                <div key={i} className="flex space-x-2 leading-relaxed items-start">
+                  <span className="text-slate-600 shrink-0">
+                    {new Date(log.timestamp * 1000).toLocaleTimeString()}
+                  </span>
+                  <span className={`shrink-0 font-bold ${
+                    log.level === 'ORDER_FILLED' || log.level === 'SIGNAL' ? 'text-emerald-400' :
+                    log.level === 'SENTIMENT' || log.level === 'AGGREGATOR' ? 'text-cyan-400' :
+                    log.level === 'KILL_SWITCH' || log.level === 'ORDER_ERROR' ? 'text-rose-400' :
+                    'text-slate-400'
+                  }`}>
+                    [{log.level}]
+                  </span>
+                  <span className="text-slate-300 break-words">{log.message}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+        </section>
+
+      </main>
+    </div>
+  );
+}
