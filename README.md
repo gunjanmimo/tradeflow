@@ -199,6 +199,16 @@ curl -X POST localhost:8000/api/capital-plan -d '{"mode":"classic"}' -H 'content
 
 ---
 
+## 🏷️ Versioning
+
+Current version: **`0.0.0`** (pre-release).
+
+TradeFlow follows [Semantic Versioning](https://semver.org). While it stays on `0.0.x`, treat it as an experimental side project: anything may change. The version is **not bumped for every change**. It moves only when a significant update lands, and each bump gets a matching git tag (`vX.Y.Z`) and GitHub release.
+
+The version lives in `api/core/version.py` (backend, also reported by `GET /api/status`) and `app/package.json` (frontend). Keep them in sync when bumping.
+
+---
+
 ## 🤝 Contributing
 
 TradeFlow is a **free, open-source, AI-based trading platform for your own personal use**, and pull requests to improve it are very welcome: bug fixes, new strategies, better risk controls, tests, documentation or UI work.

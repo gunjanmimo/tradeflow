@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from core.config import settings
+from core.version import __version__
 from core.state import state
 from sentiment.laya_service import laya_service
 from engine.executor import executor
@@ -234,7 +235,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Tradeflow Quant API",
     description="Sub-second Continuous Quant Trading Engine with Embedded Laya Decision Model",
-    version="1.0.0",
+    version=__version__,
     lifespan=lifespan
 )
 
@@ -275,6 +276,7 @@ class StrategyOverrideRequest(BaseModel):
 async def get_status():
     return {
         "status": "online",
+        "version": __version__,
         "is_trading_active": state.is_trading_active,
         "is_connected_to_alpaca": executor.is_connected,
         "mode": "ALPACA_PAPER" if not executor.is_mock_mode else "SIMULATED_PAPER",
