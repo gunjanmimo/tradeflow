@@ -22,6 +22,8 @@ from engine.strategies.base import Strategy
 from engine.strategies.momentum import MomentumBreakoutStrategy
 from engine.strategies.news_catalyst import NewsCatalystStrategy
 from engine.strategies.mean_reversion import MeanReversionStrategy
+from engine.strategies.library import LIBRARY
+from engine.strategies.adaptive import AdaptiveStrategy
 
 logger = logging.getLogger("tradeflow.strategies")
 
@@ -31,6 +33,8 @@ _STRATEGIES: Dict[str, Strategy] = {
         MomentumBreakoutStrategy(),
         NewsCatalystStrategy(),
         MeanReversionStrategy(),
+        AdaptiveStrategy(),
+        *(cls() for cls in LIBRARY),
     )
 }
 
@@ -82,6 +86,22 @@ def resolve(symbol: str, class_defaults: Dict[str, str],
             name, klass,
         )
     return _STRATEGIES["momentum_breakout"]
+
+
+def for_position(symbol: str, position: Optional[Dict], class_defaults: Dict[str, str],
+                 overrides: Dict[str, str]) -> Strategy:
+    """
+    The strategy that manages an OPEN position's exits: the one that opened it.
+
+    Resolving fresh each tick meant changing a class default (or the adaptive
+    selector changing its pick) silently swapped a live trade's exit rules.
+    Falls back to normal resolution for positions with no recorded entry
+    strategy, such as ones opened before this process started.
+    """
+    name = (position or {}).get("entry_strategy")
+    if name and name in _STRATEGIES:
+        return _STRATEGIES[name]
+    return resolve(symbol, class_defaults, overrides)
 
 
 def describe_all() -> Dict:

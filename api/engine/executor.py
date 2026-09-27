@@ -1,13 +1,26 @@
 import logging
 import asyncio
 import time
+import uuid
 from typing import Optional, Dict, Any
 from core.config import settings
 from core.state import state, TradeDecision
 from engine.risk_guard import risk_guard
+from core.latency import latency
 from engine import brackets
 
 logger = logging.getLogger("tradeflow.executor")
+
+ORDER_ID_PREFIX = "tf-"
+
+# Fields snapshotted at entry (see _execute_buy) that must survive broker syncs.
+ENTRY_CONTEXT_KEYS = frozenset({
+    "opened_at", "laya_pos", "laya_neg", "sentiment_headline", "sentiment_age_s",
+    "consensus_score", "conviction_tier", "composite_conviction", "entry_rsi",
+    "entry_spread", "entry_atr_pct", "stop_pct", "buy_prob", "entry_reason",
+    "entry_strategy", "entry_regime", "council_verdict", "council_consensus",
+    "mc_p_tp_first",
+})
 
 class AlpacaExecutor:
     """
@@ -27,6 +40,73 @@ class AlpacaExecutor:
         # symbol -> entry-context snapshot, merged into the position once the
         # broker sync reports the fill. Cleared when the position closes.
         self.pending_entry_context: Dict[str, Dict[str, Any]] = {}
+
+        # --- Unfilled-order tracking ---
+        # A submitted order is not a position until it fills. Previously nothing
+        # tracked the gap: an order that never filled (measured: HYPE/USD on
+        # Alpaca paper, 0 fills ever) left no position, so the next signal
+        # submitted another one -- 27 stacked orders held ~all the cash.
+        # symbol -> [{id, side, submitted_at, client_order_id}], refreshed each sync
+        self.open_orders: Dict[str, list] = {}
+        # symbol -> submit time; set on submit, cleared once the sync shows a
+        # position or no open order. Covers the gap before the next sync.
+        self.awaiting_fill: Dict[str, float] = {}
+        # symbol -> unix time until which new buys are refused (after a stale cancel)
+        self.cooldown_until: Dict[str, float] = {}
+        self._reject_logged: Dict[tuple, float] = {}
+
+    def entry_block_reason(self, symbol: str) -> Optional[str]:
+        """Why a new BUY for this symbol must not be sent, or None."""
+        now = time.time()
+        until = self.cooldown_until.get(symbol)
+        if until and now < until:
+            return (f"{symbol} is on cooldown for {(until - now) / 60:.0f} more min: a previous "
+                    f"order sat unfilled for {settings.STALE_ORDER_SECONDS:.0f}s and was cancelled")
+        if any(o["side"] == "buy" for o in self.open_orders.get(symbol, ())):
+            return f"{symbol} already has an unfilled BUY order at the broker"
+        if symbol in self.awaiting_fill:
+            return f"{symbol} order submitted {now - self.awaiting_fill[symbol]:.0f}s ago, awaiting fill"
+        return None
+
+    def _sync_open_orders(self, filled_symbols: set):
+        """
+        Refreshes open broker orders, clears awaiting-fill markers, and cancels
+        this engine's own crypto BUY orders that have sat unfilled too long.
+        Runs inside the sync thread, never on the event loop.
+        """
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+        from core.state import is_crypto_symbol
+        orders = self.trading_client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500))
+        now = time.time()
+        by_symbol: Dict[str, list] = {}
+        for o in orders:
+            sym = o.symbol
+            if sym.endswith("USD") and "/" not in sym and len(sym) > 3 and is_crypto_symbol(sym[:-3] + "/USD"):
+                sym = sym[:-3] + "/USD"
+            side = "buy" if "BUY" in str(o.side).upper() else "sell"
+            submitted = o.submitted_at.timestamp() if o.submitted_at else now
+            coid = o.client_order_id or ""
+            # Crypto trades 24/7, so a market order should fill in seconds. Only
+            # orders this engine placed (client_order_id "tf-") are cancelled;
+            # equities are exempt because a queued after-hours order is normal.
+            if (side == "buy" and coid.startswith(ORDER_ID_PREFIX) and is_crypto_symbol(sym)
+                    and now - submitted > settings.STALE_ORDER_SECONDS):
+                try:
+                    self.trading_client.cancel_order_by_id(o.id)
+                    self.cooldown_until[sym] = now + settings.UNFILLED_COOLDOWN_SECONDS
+                    state.log_event("ORDER_STALE",
+                        f"Cancelled unfilled BUY {sym} after {now - submitted:.0f}s; no new "
+                        f"{sym} buys for {settings.UNFILLED_COOLDOWN_SECONDS / 60:.0f} min")
+                    continue
+                except Exception as e:
+                    logger.warning(f"Could not cancel stale order {o.id} for {sym}: {e}")
+            by_symbol.setdefault(sym, []).append(
+                {"id": str(o.id), "side": side, "submitted_at": submitted, "client_order_id": coid})
+        self.open_orders = by_symbol
+        for sym in list(self.awaiting_fill):
+            if sym in filled_symbols or sym not in by_symbol:
+                self.awaiting_fill.pop(sym, None)
 
     def is_symbol_tradable(self, symbol: str) -> bool:
         if self.is_mock_mode:
@@ -145,8 +225,11 @@ class AlpacaExecutor:
                 reward = old_pos.get("dollar_reward") or round(abs(tp - avg_entry) * qty, 2)
 
                 ctx = self.pending_entry_context.pop(normalized_sym, None) or {}
-                # Entry context already on the position wins over a pending snapshot
-                merged_ctx = {**ctx, **{k: v for k, v in old_pos.items() if k in ctx}}
+                # Carry entry context forward on every sync, not just the first: the
+                # pending snapshot is consumed once, so keying only on it dropped the
+                # context (and the position's entry strategy) on the next sync.
+                carried = {k: v for k, v in old_pos.items() if k in ENTRY_CONTEXT_KEYS}
+                merged_ctx = {**ctx, **carried}
 
                 new_positions[normalized_sym] = {
                     **merged_ctx,
@@ -181,6 +264,10 @@ class AlpacaExecutor:
                 if old.get("mode") in ("SIMULATED", "PAPER_SIMULATED") and sym not in new_positions:
                     new_positions[sym] = old
             state.active_positions = new_positions
+            try:
+                self._sync_open_orders(set(new_positions))
+            except Exception as e:
+                logger.error(f"Open-order sync failed: {e}")
         except Exception as e:
             logger.error(f"Error syncing account from Alpaca: {e}")
 
@@ -207,7 +294,13 @@ class AlpacaExecutor:
         # 1. Risk check (evaluated before locking order in-flight)
         can_open, reason = risk_guard.can_open_position(symbol)
         if not can_open:
-            state.log_event("RISK_REJECT", f"Cannot buy {symbol}: {reason}")
+            # A standing block (cooldown, open order, halt) re-fires on every
+            # tick; log each distinct reason once a minute, not twice a second.
+            key = (symbol, " ".join(reason.split()[:3]))
+            now = time.time()
+            if now - self._reject_logged.get(key, 0.0) >= 60.0:
+                self._reject_logged[key] = now
+                state.log_event("RISK_REJECT", f"Cannot buy {symbol}: {reason}")
             return
 
         self.pending_orders.add(symbol)
@@ -216,6 +309,26 @@ class AlpacaExecutor:
             quant = state.quant_metrics.get(symbol)
             if not tick:
                 return
+
+            # 1b. Quant council + Monte Carlo: the whole strategy library's read on
+            # this symbol, precomputed by the analysis worker process. Reading it
+            # here is a dict lookup -- nothing is computed on the order path. A
+            # missing or stale result means "no opinion", never a block.
+            analysis = state.fresh_analysis(symbol)
+            council = (analysis or {}).get("council")
+            mc = (analysis or {}).get("mc")
+            if settings.COUNCIL_ENTRY_CHECK and council and council["verdict"] == "oppose":
+                state.log_event("COUNCIL_VETO", council["summary"])
+                return
+            if (settings.MC_MIN_TP_FIRST_PROB > 0 and mc
+                    and mc["p_tp_first"] < settings.MC_MIN_TP_FIRST_PROB):
+                state.log_event("MC_VETO",
+                    f"{symbol}: Monte Carlo P(target before stop) {mc['p_tp_first']:.2f} "
+                    f"< {settings.MC_MIN_TP_FIRST_PROB:.2f} over {mc['horizon_samples']} samples")
+                return
+
+            gate = state.last_gate_detail.get(symbol) or {}
+            entry_strategy = gate.get("selected_strategy") or gate.get("strategy")
 
             # 2. Sizing calculation via Laya Allocation Manager
             atr = quant.atr if quant else 0.50
@@ -243,10 +356,10 @@ class AlpacaExecutor:
             try:
                 from memory.agent_memory import agent_memory
                 if agent_memory.enabled:
-                    strat_name = (state.last_gate_detail.get(symbol) or {}).get("strategy", "unknown")
                     from engine.strategies import registry as _reg
-                    _strat = _reg.resolve(symbol, state.strategy_class_defaults,
-                                          state.strategy_overrides)
+                    _strat = (_reg.get(entry_strategy) if entry_strategy else None) or \
+                        _reg.resolve(symbol, state.strategy_class_defaults,
+                                     state.strategy_overrides)
                     verdict = await agent_memory.should_avoid(
                         strategy=_strat.name, symbol=symbol,
                         rsi=quant.rsi if quant else None,
@@ -262,6 +375,8 @@ class AlpacaExecutor:
                 logger.debug(f"Memory check skipped for {symbol}: {e}")
 
             state.log_event("ALLOCATION", alloc["rationale"])
+            if council:
+                state.log_event("COUNCIL", council["summary"])
 
             # Snapshot the conditions that justified this entry. Without it, a closed
             # trade tells you the PnL but not what the engine believed at the time,
@@ -283,6 +398,12 @@ class AlpacaExecutor:
                 "dollar_reward": alloc.get("reward_dollars"),
                 "buy_prob": decision.buy_prob,
                 "entry_reason": decision.reason,
+                # The strategy whose thesis this trade is; its exit rules govern it.
+                "entry_strategy": entry_strategy,
+                "entry_regime": gate.get("regime") or ((analysis or {}).get("regime") or {}).get("label"),
+                "council_verdict": council["verdict"] if council else None,
+                "council_consensus": council["deciding_consensus"] if council else None,
+                "mc_p_tp_first": mc["p_tp_first"] if mc else None,
             }
 
             t0 = time.time()
@@ -327,13 +448,16 @@ class AlpacaExecutor:
             from alpaca.trading.enums import OrderSide, TimeInForce
             from core.state import is_crypto_symbol
 
+            # Tagged so the engine can tell its own orders from manual ones.
+            client_order_id = f"{ORDER_ID_PREFIX}{uuid.uuid4().hex[:20]}"
             if is_crypto_symbol(symbol):
                 # Crypto uses direct GTC market order (stop-loss and take-profit managed in-engine)
                 req = MarketOrderRequest(
                     symbol=symbol,
                     qty=qty,
                     side=OrderSide.BUY,
-                    time_in_force=TimeInForce.GTC
+                    time_in_force=TimeInForce.GTC,
+                    client_order_id=client_order_id,
                 )
             else:
                 # Equities use broker-native bracket order
@@ -342,17 +466,21 @@ class AlpacaExecutor:
                     qty=qty,
                     side=OrderSide.BUY,
                     time_in_force=TimeInForce.GTC,
+                    client_order_id=client_order_id,
                     take_profit=TakeProfitRequest(limit_price=take_profit),
                     stop_loss=StopLossRequest(stop_price=stop_loss)
                 )
 
             loop = asyncio.get_running_loop()
+            t_sub = time.perf_counter_ns()
             order = await loop.run_in_executor(None, self.trading_client.submit_order, req)
+            latency.record_ns("order_submit", t_sub)
             latency_ms = (time.time() - t0) * 1000
 
             # Hold the entry context until the broker sync materialises the position,
             # so the closed-trade record can still report what justified the entry.
             self.pending_entry_context[symbol] = entry_context
+            self.awaiting_fill[symbol] = time.time()
 
             # Deduct cash locally and trigger async broker sync
             order_cost = round(qty * tick.price, 2)
@@ -433,7 +561,9 @@ class AlpacaExecutor:
             alpaca_sym = symbol.replace("/", "") if is_crypto_symbol(symbol) else symbol
             
             loop = asyncio.get_running_loop()
+            t_cl = time.perf_counter_ns()
             await loop.run_in_executor(None, self.trading_client.close_position, alpaca_sym)
+            latency.record_ns("order_close", t_cl)
             latency_ms = (time.time() - t0) * 1000
             # Book the position's last-known unrealised PnL as realised. The exact
             # fill price arrives on the next broker sync; this keeps the daily-loss
@@ -511,6 +641,9 @@ class AlpacaExecutor:
         # Persist to agent memory WITHOUT awaiting: a slow graph write must never
         # delay a liquidation. Failures are logged inside remember_trade.
         record["strategy"] = pos.get("strategy")
+        record["entry_strategy"] = pos.get("entry_strategy")
+        record["entry_regime"] = pos.get("entry_regime")
+        record["council_verdict"] = pos.get("council_verdict")
         record["bot_id"] = pos.get("bot_id")
         record["opened_at"] = pos.get("opened_at")
         try:

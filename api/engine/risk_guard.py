@@ -22,6 +22,11 @@ class RiskGuard:
 
         profile = state.risk_profile
 
+        from core.capital_plan import capital_plan
+        stair_block = capital_plan.entry_block_reason()
+        if stair_block:
+            return False, stair_block
+
         if state.daily_loss_pct >= profile.max_daily_loss_pct:
             reason = (f"Daily loss limit hit: -{state.daily_loss_pct:.2f}% of budget "
                       f"(limit {profile.max_daily_loss_pct}% at risk dial {profile.factor}). No new entries until tomorrow.")
@@ -58,6 +63,9 @@ class RiskGuard:
         from engine.executor import executor
         if symbol in executor.pending_orders:
             return False, f"An order is already in-flight for {symbol}."
+        order_block = executor.entry_block_reason(symbol)
+        if order_block:
+            return False, order_block
 
         # 3. Check if broker supports trading this asset
         if executor.is_connected and not executor.is_mock_mode:

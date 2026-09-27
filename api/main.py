@@ -1,4 +1,5 @@
 import asyncio
+import time
 import logging
 from contextlib import asynccontextmanager
 from typing import List, Dict, Any, Optional
@@ -21,6 +22,9 @@ from engine import brackets
 from core import risk_profile as risk_profile_mod
 from engine.strategies import registry as strategy_registry
 from memory.agent_memory import agent_memory
+from core.latency import latency, monitor_event_loop
+from engine.analysis.service import analysis_service
+from core.capital_plan import capital_plan
 
 # Configure logging
 logging.basicConfig(
@@ -37,6 +41,9 @@ async def broadcast_telemetry():
     while True:
         try:
             if active_connections:
+                # Refreshed at most once a second, yielding between stages.
+                latency_snapshot = await latency.refresh()
+                t_build = time.perf_counter_ns()
                 payload = {
                     "is_trading_active": state.is_trading_active,
                     "account": state.account_info,
@@ -102,8 +109,15 @@ async def broadcast_telemetry():
                     "risk": _portfolio_risk_snapshot(),
                     "sentinel_bots": sentinel_registry.to_dict(),
                     "recent_trades": list(state.recent_trades)[-50:],
-                    "logs": list(state.logs)[-25:]
+                    "logs": list(state.logs)[-25:],
+                    "analysis": _analysis_summary(),
+                    "portfolio_analytics": state.portfolio_analytics,
+                    "analysis_status": analysis_service.status(),
+                    "capital_plan": capital_plan.plan.to_dict(),
+                    "latency": latency_snapshot,
+                    "server_time": time.time(),
                 }
+                latency.record_ns("telemetry_build", t_build)
                 dead_connections = []
                 for ws in active_connections:
                     try:
@@ -120,6 +134,42 @@ async def broadcast_telemetry():
             logger.error(f"Error in telemetry broadcast: {e}")
             await asyncio.sleep(1.0)
 
+_summary_cache: Dict[str, Any] = {"at": None, "data": {}}
+
+
+def _analysis_summary() -> Dict[str, Any]:
+    """
+    Compact per-symbol view of the worker's results, for the dashboard.
+    Rebuilt only when a new worker cycle lands (1Hz), not on every 4Hz frame.
+    """
+    if _summary_cache["at"] == state.analysis_at:
+        return _summary_cache["data"]
+    out = {}
+    for sym, a in list(state.analysis.items()):
+        c = a.get("council") or {}
+        reg = a.get("regime") or {}
+        mc = a.get("mc") or {}
+        pair = a.get("pair") or {}
+        out[sym] = {
+            "regime": reg.get("label"),
+            "regime_confidence": reg.get("confidence"),
+            "verdict": c.get("verdict"),
+            "consensus": c.get("deciding_consensus"),
+            "n_bullish": c.get("n_bullish"),
+            "n_bearish": c.get("n_bearish"),
+            "n_voters": c.get("n_voters"),
+            "recommended": c.get("recommended"),
+            "top_candidates": (a.get("candidates") or [])[:3],
+            "mc_p_tp_first": mc.get("p_tp_first"),
+            "mc_drift_edge": mc.get("drift_edge"),
+            "pair_partner": pair.get("partner"),
+            "pair_z": pair.get("z"),
+            "at": a.get("at"),
+        }
+    _summary_cache["at"], _summary_cache["data"] = state.analysis_at, out
+    return out
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Initializing Tradeflow Continuous Trading Engine...")
@@ -130,6 +180,10 @@ async def lifespan(app: FastAPI):
             await agent_memory.initialize()
         except Exception as e:
             logger.warning(f"Agent memory unavailable, continuing without it: {e}")
+
+    # 0b. Capital plan (classic / stair). Loaded before trading can start so the
+    # budget is right from the first tick and banked income survives restarts.
+    capital_plan.load()
 
     # 1. Initialize Laya in-process sentiment model
     await laya_service.initialize()
@@ -158,12 +212,19 @@ async def lifespan(app: FastAPI):
     # 9. Start Telemetry Broadcaster
     telemetry_task = asyncio.create_task(broadcast_telemetry())
 
+    # 10. Off-process analytics (council, regime, Monte Carlo, pairs, risk) and
+    # the event-loop lag monitor that proves they are not slowing the tick path.
+    await analysis_service.start()
+    loop_monitor_task = asyncio.create_task(monitor_event_loop())
+
     logger.info("Tradeflow sub-second trading engine is LIVE!")
     yield
 
     logger.info("Shutting down Tradeflow engine...")
     telemetry_task.cancel()
     sync_task.cancel()
+    loop_monitor_task.cancel()
+    await analysis_service.stop()
     await trend_aggregator.stop()
     await market_scheduler.stop()
     await market_stream.stop()
@@ -194,6 +255,13 @@ class BudgetUpdateRequest(BaseModel):
 
 class RiskFactorRequest(BaseModel):
     risk_factor: int
+
+class CapitalPlanRequest(BaseModel):
+    mode: str                          # "classic" | "stair"
+    deposit: Optional[float] = None    # required for stair
+    deploy_pct: float = 0.5
+    target_multiple: float = 2.0
+    harvest_pct: float = 0.5
 
 class StrategyClassRequest(BaseModel):
     asset_class: str      # "crypto" | "equity"
@@ -415,6 +483,62 @@ async def set_symbol_strategy(req: StrategyOverrideRequest):
     return {"status": "success", "symbol": sym, "strategy": req.strategy}
 
 
+@app.get("/api/quant/library")
+async def quant_library():
+    """The quant strategy library, each strategy's regimes/source, and realised track record."""
+    from engine.strategies import performance
+    return {
+        "strategies": [s.describe() for s in strategy_registry.available() if s.council_member],
+        "track_record": performance.stats(),
+        "council_settings": {
+            "analysis_interval_s": settings.ANALYSIS_INTERVAL_SECONDS,
+            "adaptive_top_k": settings.ADAPTIVE_TOP_K,
+            "mc_min_tp_first_prob": settings.MC_MIN_TP_FIRST_PROB,
+            "entry_check": settings.COUNCIL_ENTRY_CHECK,
+            "exit_check": settings.COUNCIL_EXIT_CHECK,
+            "min_voters": settings.COUNCIL_MIN_VOTERS,
+            "veto_consensus": settings.COUNCIL_VETO_CONSENSUS,
+            "exit_consensus": settings.COUNCIL_EXIT_CONSENSUS,
+        },
+    }
+
+
+@app.get("/api/quant/regimes")
+async def quant_regimes():
+    """Live market regime per symbol and the ranked suited strategies (from the worker)."""
+    return {
+        "regimes": {
+            sym: {**(a.get("regime") or {}), "suited_strategies": a.get("candidates") or [],
+                  "age_s": round(time.time() - a.get("at", 0.0), 1)}
+            for sym, a in sorted(state.analysis.items())
+        },
+        "worker": analysis_service.status(),
+    }
+
+
+@app.get("/api/quant/analyze/{symbol:path}")
+async def quant_analyze(symbol: str):
+    """Full worker report for one symbol: council votes, regime, Monte Carlo, pair."""
+    sym = symbol.upper().strip()
+    a = state.analysis.get(sym)
+    if a is None:
+        raise HTTPException(status_code=404,
+            detail=f"No analysis for {sym} yet (worker runs every {settings.ANALYSIS_INTERVAL_SECONDS}s)")
+    return {"symbol": sym, "age_s": round(time.time() - a.get("at", 0.0), 2), **a}
+
+
+@app.get("/api/quant/portfolio")
+async def quant_portfolio():
+    """Portfolio analytics: ledger performance ratios and open-position VaR/CVaR."""
+    return state.portfolio_analytics or {"status": "warming up"}
+
+
+@app.get("/api/latency")
+async def get_latency():
+    """Latency percentiles per stage (hot path, broker, feed, event loop, worker)."""
+    return {**latency.snapshot(max_age_s=0.0), "worker": analysis_service.status()}
+
+
 @app.get("/api/gates")
 async def get_gates():
     """
@@ -488,8 +612,40 @@ async def set_risk_factor(req: RiskFactorRequest):
     }
 
 
+@app.get("/api/capital-plan")
+async def get_capital_plan():
+    """Current capital mode, stair ladder progress, and stage history."""
+    from core.capital_plan import min_stage_capital
+    return {**capital_plan.plan.to_dict(),
+            "min_trading_capital": min_stage_capital(state.risk_profile.max_position_notional_pct)}
+
+
+@app.post("/api/capital-plan")
+async def set_capital_plan(req: CapitalPlanRequest):
+    """
+    Switches between classic and stair capital management. Takes effect on the
+    next evaluation. Switching stair ON starts a fresh ladder from `deposit`.
+    """
+    mode = req.mode.lower().strip()
+    if mode == "classic":
+        return {"status": "success", "plan": capital_plan.disable_stair()}
+    if mode != "stair":
+        raise HTTPException(status_code=400, detail="mode must be 'classic' or 'stair'")
+    if req.deposit is None or req.deposit <= 0:
+        raise HTTPException(status_code=400, detail="deposit is required for stair mode")
+    try:
+        plan = capital_plan.enable_stair(req.deposit, req.deploy_pct,
+                                         req.target_multiple, req.harvest_pct)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "success", "plan": plan}
+
+
 @app.post("/api/budget")
 async def update_budget(req: BudgetUpdateRequest):
+    if capital_plan.plan.mode == "stair":
+        raise HTTPException(status_code=409,
+            detail="Stair mode manages the trading budget from the ladder. Switch to classic to set it manually.")
     if req.allocated_capital < 100.0:
         raise HTTPException(status_code=400, detail="Minimum trading budget is $100.00")
     if req.allocated_capital > 1000000.0:

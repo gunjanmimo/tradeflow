@@ -5,6 +5,7 @@ from typing import Dict, Any, Optional
 from core.state import state, TradeDecision
 from core.config import settings
 from engine import brackets
+from core.latency import latency
 
 logger = logging.getLogger("tradeflow.sentinel")
 
@@ -57,6 +58,10 @@ class PositionSentinelBot:
         self.thesis = f"Assigned to {self.symbol}: ${self.invested_dollars:,.2f} invested ({self.allocated_pct}% of budget). Guarding capital."
         self.is_running = True
         self._task = None
+        # Latest quant-council read on this position. Computed by the analysis
+        # worker process; the bot only reads it, so it costs nothing per tick.
+        self.council: Optional[Dict[str, Any]] = None
+        self._council_seen_at = 0.0
 
     def start(self):
         try:
@@ -69,8 +74,9 @@ class PositionSentinelBot:
             from memory.agent_memory import agent_memory
             from engine.strategies import registry as _reg
             if agent_memory.enabled:
-                _strat = _reg.resolve(self.symbol, state.strategy_class_defaults,
-                                      state.strategy_overrides)
+                _strat = _reg.for_position(self.symbol, state.active_positions.get(self.symbol),
+                                           state.strategy_class_defaults,
+                                           state.strategy_overrides)
                 loop = asyncio.get_running_loop()
                 loop.create_task(agent_memory.remember_bot(
                     self.bot_id, self.symbol, _strat.name))
@@ -93,9 +99,16 @@ class PositionSentinelBot:
         )
 
     async def on_tick(self, price: float):
-        """Called on every single price tick for this symbol (<0.02ms critical path)"""
+        """Called on every single price tick for this symbol."""
         if not self.is_running:
             return
+        t0 = time.perf_counter_ns()
+        try:
+            await self._on_tick(price)
+        finally:
+            latency.record_ns("sentinel_tick", t0)
+
+    async def _on_tick(self, price: float):
 
         price = float(price)
         last_price = self.last_price or price
@@ -254,30 +267,31 @@ class PositionSentinelBot:
         # instead of every position sharing one hardcoded sell formula.
         strategy_exit = False
         strategy_reason = ""
+        council_exit = False
+        council_reason = ""
         try:
             from engine.strategies import registry as _registry
-            from engine.strategies.base import StrategyContext as _Ctx
-            from feeds.multi_source_aggregator import trend_aggregator as _agg
-            from core.state import is_crypto_symbol as _is_crypto
-            _strat = _registry.resolve(self.symbol, state.strategy_class_defaults,
-                                       state.strategy_overrides)
-            _ctx = _Ctx(
-                symbol=self.symbol, price=price, quant=quant, sentiment=sentiment,
-                consensus=_agg.get_consensus(self.symbol),
-                is_crypto=_is_crypto(self.symbol), position=pos,
-                highest_price=self.highest_price,
-            )
+            from engine.strategies.context import build_context
+            # The strategy that OPENED this trade governs its exit, not whatever the
+            # symbol's routing says now.
+            _strat = _registry.for_position(self.symbol, pos, state.strategy_class_defaults,
+                                            state.strategy_overrides)
+            _ctx = build_context(self.symbol, price=price, position=pos,
+                                 highest_price=self.highest_price,
+                                 quant=quant, sentiment=sentiment)
             _res = _strat.evaluate_exit(_ctx)
             strategy_exit = _res.should_close
             strategy_reason = _res.reason
             self.sell_prob = _res.sell_prob
             self.close_prob = max(self.close_prob, _res.close_prob)
             pos["strategy"] = _strat.name
+
+            council_exit, council_reason = self._council_check()
         except Exception as _e:
             logger.error(f"[{self.bot_id}] strategy exit evaluation failed: {_e}")
 
         # 4. Autonomous Exit Execution
-        if hit_stop or hit_tp or strong_sell_signal or strategy_exit:
+        if hit_stop or hit_tp or strong_sell_signal or strategy_exit or council_exit:
             self.status = "TRIGGERING_EXIT"
             if hit_stop:
                 reason = f"[{self.bot_id}] Stop-loss triggered: Price ${price:,.6g} <= SL ${self.stop_loss:,.6g}"
@@ -285,6 +299,8 @@ class PositionSentinelBot:
                 reason = f"[{self.bot_id}] Take-profit triggered: Price ${price:,.6g} >= TP ${self.take_profit:,.6g}"
             elif strategy_exit:
                 reason = f"[{self.bot_id}] Strategy exit: {strategy_reason}"
+            elif council_exit:
+                reason = f"[{self.bot_id}] Council exit: {council_reason}"
             else:
                 reason = f"[{self.bot_id}] Model exit triggered: sell_prob={self.sell_prob:.2f} (Laya={sentiment.neg_prob:.2f})"
 
@@ -301,6 +317,38 @@ class PositionSentinelBot:
                 close=True,
                 reason=reason
             )))
+
+    def _council_check(self):
+        """
+        Reads the worker's latest council report for this symbol. Returns
+        (should_exit, reason).
+
+        Exits only on a decisive bearish consensus among regime-suited strategies
+        -- a stricter bar than the manager's entry veto, because closing a working
+        trade on a marginal read churns fees for nothing. Each report is acted on
+        once, when it first arrives.
+        """
+        from core.config import settings
+        a = state.fresh_analysis(self.symbol)
+        report = (a or {}).get("council")
+        if not report or a["at"] <= self._council_seen_at:
+            return False, ""
+        self._council_seen_at = a["at"]
+        c = report["deciding_consensus"]
+        self.council = {
+            "verdict": report["verdict"], "consensus": c,
+            "regime": (a.get("regime") or {}).get("label"),
+            "summary": report["summary"], "at": a["at"],
+            "mc_p_tp_first": (a.get("mc") or {}).get("p_tp_first"),
+        }
+        pos = state.active_positions.get(self.symbol)
+        if pos is not None:
+            pos["council"] = self.council
+        if (settings.COUNCIL_EXIT_CHECK
+                and report["n_voters"] >= settings.COUNCIL_MIN_VOTERS
+                and c <= settings.COUNCIL_EXIT_CONSENSUS):
+            return True, report["summary"]
+        return False, ""
 
     async def _sentinel_loop(self):
         """Heartbeat loop ensuring continuous watch even between ticks"""
@@ -338,7 +386,8 @@ class PositionSentinelBot:
             "buy_prob": self.buy_prob,
             "sell_prob": self.sell_prob,
             "close_prob": self.close_prob,
-            "thesis": self.thesis
+            "thesis": self.thesis,
+            "council": self.council,
         }
 
 class SentinelRegistry:

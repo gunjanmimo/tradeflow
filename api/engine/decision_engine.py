@@ -17,10 +17,10 @@ The trading logic itself lives in engine/strategies/.
 import time
 
 from core.config import settings
-from core.state import state, TradeDecision, QuantMetrics, SentimentRecord, is_crypto_symbol
+from core.state import state, TradeDecision, QuantMetrics, SentimentRecord
 from engine import brackets
 from engine.strategies import registry
-from engine.strategies.base import StrategyContext
+from engine.strategies.context import build_context
 
 
 class DecisionEngine:
@@ -33,26 +33,17 @@ class DecisionEngine:
 
         price = current_tick.price
         holding = symbol in state.active_positions
-        profile = state.risk_profile
 
-        strategy = registry.resolve(symbol, state.strategy_class_defaults,
-                                    state.strategy_overrides)
+        position = state.active_positions.get(symbol)
+        if holding:
+            strategy = registry.for_position(symbol, position, state.strategy_class_defaults,
+                                             state.strategy_overrides)
+        else:
+            strategy = registry.resolve(symbol, state.strategy_class_defaults,
+                                        state.strategy_overrides)
 
-        from feeds.multi_source_aggregator import trend_aggregator
-        consensus = trend_aggregator.get_consensus(symbol)
-
-        ctx = StrategyContext(
-            symbol=symbol,
-            price=price,
-            quant=quant,
-            sentiment=sentiment,
-            consensus=consensus,
-            is_crypto=is_crypto_symbol(symbol),
-            position=state.active_positions.get(symbol),
-        )
-        # The risk dial's entry bar is enforced inside the strategy so its own
-        # reason string can name it, rather than the engine silently overriding.
-        ctx._min_buy_prob = profile.min_buy_prob
+        ctx = build_context(symbol, price=price, position=position,
+                            quant=quant, sentiment=sentiment)
 
         if holding:
             decision = self._evaluate_holding(symbol, ctx, strategy, price, quant)
@@ -83,6 +74,10 @@ class DecisionEngine:
         action = "BUY" if entry.should_enter else "HOLD"
         state.last_gate_detail[symbol] = {
             "strategy": strategy.name,
+            # For the adaptive selector: the library strategy it actually chose.
+            # The executor stamps this on the position so exits follow the thesis.
+            "selected_strategy": entry.gates.get("selected_strategy") or strategy.name,
+            "regime": entry.gates.get("regime"),
             "should_enter": entry.should_enter,
             "buy_prob": entry.buy_prob,
             "blocked_by": entry.blocked_by,
