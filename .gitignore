@@ -26,3 +26,6 @@ app/dist/
 !**/.env.example
 *.pem
 *.key
+
+# Runtime state (capital plan ledger)
+api/data/

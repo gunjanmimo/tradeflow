@@ -152,6 +152,19 @@ class InMemoryState:
         # Ring buffers of price history (up to 250 bars/ticks) for instant math
         self.price_history: Dict[str, deque] = {}
         self.volume_history: Dict[str, deque] = {}
+        # Wall-clock time of each price sample, parallel to price_history. Lets
+        # off-path analytics align symbols in time (pairs, correlation, VaR).
+        self.time_history: Dict[str, deque] = {}
+
+        # Results of the off-process analysis worker (engine/analysis): regime,
+        # quant council, Monte Carlo, pair signals per symbol, plus portfolio
+        # risk. The hot path only ever READS these; it never computes them.
+        self.analysis: Dict[str, Dict[str, Any]] = {}
+        self.portfolio_analytics: Dict[str, Any] = {}
+        self.analysis_at: float = 0.0
+        # symbol -> (tick object, price array); see history_array()
+        self._history_arrays: Dict[str, tuple] = {}
+        self.tick_count: Dict[str, int] = {}
 
         # Cached Laya sentiment scores: symbol -> SentimentRecord (derived view)
         self.sentiment_cache: Dict[str, SentimentRecord] = {}
@@ -255,6 +268,7 @@ class InMemoryState:
         if symbol not in self.price_history:
             self.price_history[symbol] = deque(maxlen=maxlen)
             self.volume_history[symbol] = deque(maxlen=maxlen)
+            self.time_history[symbol] = deque(maxlen=maxlen)
         return self.price_history[symbol]
 
     def update_price(self, symbol: str, price: float, bid: float = 0.0, ask: float = 0.0, volume: float = 0.0):
@@ -262,6 +276,10 @@ class InMemoryState:
         self.latest_prices[symbol] = tick
         buf = self.get_or_create_history(symbol)
         buf.append(price)
+        # Monotonic per-symbol sample counter: lets incremental indicators tell
+        # "exactly one new sample" apart from gaps they must recompute over.
+        self.tick_count[symbol] = self.tick_count.get(symbol, 0) + 1
+        self.time_history[symbol].append(tick.timestamp)
         if volume > 0:
             self.volume_history[symbol].append(volume)
 
@@ -275,6 +293,32 @@ class InMemoryState:
                 pos["current_price"] = round(price, precision)
                 pos["unrealized_pl"] = round((price - avg) * qty, 2)
                 pos["unrealized_plpc"] = round((price - avg) / avg, 5)
+
+    def history_array(self, symbol: str):
+        """
+        The symbol's price history as a numpy array, converted at most once per
+        tick: the quant matrix and the strategy context both need it, and the
+        deque -> array copy is a measurable share of the tick path.
+        """
+        import numpy as np
+        tick = self.latest_prices.get(symbol)
+        cached = self._history_arrays.get(symbol)
+        if cached is not None and cached[0] is tick:
+            return cached[1]
+        hist = self.price_history.get(symbol) or ()
+        arr = np.fromiter(hist, dtype=np.float64, count=len(hist))
+        self._history_arrays[symbol] = (tick, arr)
+        return arr
+
+    def fresh_analysis(self, symbol: str, max_age_s: Optional[float] = None) -> Optional[Dict[str, Any]]:
+        """This symbol's latest worker result, or None if absent or older than max_age_s."""
+        from core.config import settings
+        if max_age_s is None:
+            max_age_s = settings.ANALYSIS_MAX_AGE_SECONDS
+        a = self.analysis.get(symbol)
+        if a is None or time.time() - a.get("at", 0.0) > max_age_s:
+            return None
+        return a
 
     def update_sentiment(self, record: SentimentRecord):
         """Legacy single-write path, retained for manual news injection."""
@@ -416,6 +460,9 @@ class InMemoryState:
         """Records realised PnL from a closed position against today's risk budget."""
         self.roll_trading_day_if_needed()
         self.realized_pnl_today = round(self.realized_pnl_today + float(pnl), 2)
+        # Stair mode ratchets its stage and budget off realised PnL only.
+        from core.capital_plan import capital_plan
+        capital_plan.on_realized(symbol, pnl)
 
     def update_peak_equity(self):
         eq = float(self.account_info.get("equity", 0.0))

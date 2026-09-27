@@ -44,22 +44,50 @@ class MarketSessionScheduler:
         if self._task:
             self._task.cancel()
 
+    CLOCK_TTL_SECONDS = 30.0
+
+    def _maybe_refresh_clock(self):
+        """Starts a background clock fetch when the cache is stale. Never blocks."""
+        import time as _time
+        if not hasattr(self, "_clock_cache"):
+            self._clock_cache = (False, None)
+            self._clock_at = 0.0
+            self._clock_inflight = False
+        if (self._clock_inflight or not (executor.is_connected and executor.trading_client)
+                or _time.time() - self._clock_at < self.CLOCK_TTL_SECONDS):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._clock_inflight = True
+
+        def fetch():
+            clock = executor.trading_client.get_clock()
+            return clock.is_open, clock.next_open.isoformat()
+
+        def done(fut):
+            self._clock_inflight = False
+            self._clock_at = _time.time()
+            try:
+                self._clock_cache = fut.result()
+            except Exception as e:
+                logger.debug(f"Clock refresh failed, keeping last value: {e}")
+
+        loop.run_in_executor(None, fetch).add_done_callback(done)
+
     def get_market_status(self) -> Dict[str, Any]:
         """Returns live market status, next open, and session info"""
         now_utc = datetime.now(timezone.utc)
         now_ny = datetime.now(self.tz_ny)
         now_cet = datetime.now(self.tz_cet)
 
-        # Check if Alpaca trading client is connected for live clock
-        is_us_open = False
-        next_us_open = None
-        if executor.is_connected and executor.trading_client:
-            try:
-                clock = executor.trading_client.get_clock()
-                is_us_open = clock.is_open
-                next_us_open = clock.next_open.isoformat()
-            except Exception:
-                pass
+        # Broker clock, served from a cache refreshed off the event loop.
+        # This used to call trading_client.get_clock() -- a blocking HTTP request
+        # -- on every dashboard frame: measured ~90ms, 4x/second, stalling the
+        # tick loop ~37% of the time and spending 240 of Alpaca's 200 req/min.
+        self._maybe_refresh_clock()
+        is_us_open, next_us_open = self._clock_cache
 
         # European Market hours: 09:00 - 17:30 CET on weekdays
         is_weekday = now_cet.weekday() < 5
@@ -92,9 +120,9 @@ class MarketSessionScheduler:
         logger.info(f"Executing scheduled Morning Routine for {market} Market...")
         state.log_event("SCHEDULER", f"Executing Morning Routine for {market} Market session...")
 
-        # 1. Sync accounts and positions
+        # 1. Sync accounts and positions (blocking HTTP -> off the event loop)
         if executor.is_connected:
-            executor.sync_account_and_positions()
+            await asyncio.get_running_loop().run_in_executor(None, executor.sync_account_and_positions)
 
         # 2. Sync Expert Portfolios & 4-Pillar Consensus Aggregator
         from feeds.multi_source_aggregator import trend_aggregator

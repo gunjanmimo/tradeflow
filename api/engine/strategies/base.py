@@ -59,6 +59,9 @@ class StrategyContext:
     is_crypto: bool
     position: Optional[Dict[str, Any]] = None
     highest_price: Optional[float] = None
+    # Price/volume history with memoised indicators (engine.strategies.indicators).
+    # None only when a caller builds a context by hand; library strategies abstain.
+    series: Any = None
 
 
 class Strategy(ABC):
@@ -76,6 +79,15 @@ class Strategy(ABC):
     # True when the strategy cannot function without fresh, agreeing sentiment.
     requires_sentiment: bool = False
 
+    # Market regimes this strategy is built for (see engine/strategies/regime.py).
+    # Empty means regime-agnostic. The adaptive selector only considers a strategy
+    # when the live regime is in this set.
+    regimes: tuple = ()
+    # Where the method comes from, for the UI and for honest attribution.
+    source: str = ""
+    # True for the price-only library strategies that vote in the quant council.
+    council_member: bool = False
+
     # Tunables, exposed so the UI can show and adjust them per strategy
     params: Dict[str, Any] = {}
 
@@ -86,6 +98,16 @@ class Strategy(ABC):
     @abstractmethod
     def evaluate_exit(self, ctx: StrategyContext) -> ExitDecision:
         ...
+
+    def bias(self, ctx: StrategyContext) -> float:
+        """
+        Directional read in -1..1 (+1 = this strategy's thesis is strongly long).
+
+        Distinct from evaluate_entry: a strategy can be bullish without its entry
+        trigger firing right now. Default derives it from entry conviction.
+        """
+        d = self.evaluate_entry(ctx)
+        return round(min(max((d.buy_prob - 0.5) * 2.0, -1.0), 1.0), 4)
 
     # ---- shared helpers ----
     @staticmethod
@@ -126,5 +148,8 @@ class Strategy(ABC):
             "description": self.description,
             "applies_to": self.applies_to,
             "requires_sentiment": self.requires_sentiment,
+            "regimes": list(self.regimes),
+            "source": self.source,
+            "council_member": self.council_member,
             "params": dict(self.params),
         }

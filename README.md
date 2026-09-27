@@ -1,5 +1,12 @@
 # TradeFlow: Sub-Second Quant & Laya Trading Terminal
 
+> [!CAUTION]
+> **Use at your own risk.** TradeFlow is a personal side project, **not a battle-tested trading tool**. It can place real orders, and automated trading can lose money quickly.
+>
+> **Do not use it if you don't understand the computation behind it, quantitative finance, and how stock and crypto markets work.** Nothing here is financial advice. Strategies, backtests and analytics can be wrong, and past behaviour does not predict future results.
+>
+> Start with **paper trading** (the default), read the code before trusting it, and never trade money you cannot afford to lose. The software is provided "as is", without warranty of any kind (see [LICENSE](LICENSE)).
+
 An autonomous, continuous quantitative trading system combining **Convai Innovations' Laya decision model** for sub-second sentiment scoring, a high-frequency **Quant Matrix ($t_1 \dots t_N$)**, deterministic risk management, and the **Alpaca Trading API**.
 
 ---
@@ -90,3 +97,129 @@ docker compose down
 - **C-Speed Quant Matrix ($t_1 \dots t_N$)**: Evaluates EMA 9/21, RSI 14, ATR volatility, and bid-ask spreads in **< 0.05ms**.
 - **Interactive Dashboard**: Filter by `ALL`, `STOCKS`, or `CRYPTO (24/7)`, inject live news to test Laya, and manage positions.
 - **Emergency Kill Switch**: Panic button to liquidate open positions and halt trading immediately.
+
+---
+
+## 🧠 Quant Strategy Library
+
+`api/engine/strategies/library.py` holds fifteen price-driven strategies. They are re-implemented from the published methods, not copied: backtrader and freqtrade are GPL-3, and [FinceptTerminal](https://github.com/Fincept-Corporation/FinceptTerminal) is AGPL-3.0, so copying their code would relicense this project. [Krexibd/quant-trading](https://github.com/Krexibd/quant-trading) is MIT and is credited on each strategy that came from it.
+
+| Strategy | Family | Built for regime | Source |
+|---|---|---|---|
+| `bollinger_reversion` | Mean reversion | ranging, mixed | Bollinger |
+| `connors_rsi2` | Mean reversion | ranging, trending_up, mixed | Connors & Alvarez |
+| `zscore_reversion` | Stat. reversion | ranging | Chan (O-U process) |
+| `vwap_reversion` | Mean reversion | ranging, mixed | VWAP benchmark |
+| `macd_trend` | Trend | trending_up, mixed | Appel |
+| `ma_crossover` | Trend | trending_up | zipline/backtrader classic |
+| `donchian_turtle` | Breakout | trending_up, volatile | Turtle rules |
+| `supertrend` | Trend | trending_up, volatile | Seban |
+| `ts_momentum` | Momentum | trending_up | Moskowitz, Ooi & Pedersen (2012) |
+| `volatility_squeeze` | Volatility | volatile, mixed, ranging | Bollinger "The Squeeze" |
+| `parabolic_sar` | Trend | trending_up, volatile | Wilder, via quant-trading |
+| `awesome_saucer` | Momentum | trending_up, mixed | Bill Williams, via quant-trading |
+| `heikin_ashi` | Reversal | trending_up, mixed, volatile | Heikin-Ashi, via quant-trading |
+| `candle_reversal` | Reversal | ranging, mixed | Hammer / shooting star, via quant-trading |
+| `pairs_reversion` | Stat. arb | all except trending_down | Engle-Granger pairs, via quant-trading |
+
+Lookbacks are measured in samples of the engine's price buffer (up to 250), not days. Candle strategies build OHLC micro-bars from groups of 5 samples.
+
+### Zero-latency architecture
+
+Everything heavier than a dictionary lookup runs in a **separate analysis process** (`engine/analysis/`, spawned once, every `ANALYSIS_INTERVAL_SECONDS`). A thread would still contend for Python's GIL with the tick path; a process does not. The worker computes:
+
+- **Regime** per symbol (`regime.py`): efficiency ratio, EMA slope, vol ratio, Hurst exponent.
+- **Quant council** (`council.py`): every library strategy votes, weighted by regime fit and realised track record.
+- **Monte Carlo**: block-bootstrap probability that the take-profit is hit before the stop, with and without recent drift.
+- **Pairs**: the best Engle-Granger cointegrated partner per symbol, pre-filtered by return correlation.
+- **Portfolio risk**, following FinceptTerminal's ideas (no code): ledger Sharpe, Sortino, profit factor, expectancy and max drawdown; variance-covariance VaR and CVaR of open positions, with correlations.
+
+The hot path only **reads** these results:
+
+- **Manager (executor):** refuses an entry when the council opposes it, or when Monte Carlo P(TP first) is below `MC_MIN_TP_FIRST_PROB` (0 = off).
+- **Trade bots (sentinels):** exit on a decisive bearish council read. A position's exits always follow its `entry_strategy`.
+- **Adaptive strategy:** uses the worker's regime and ranked shortlist, and re-checks only the top `ADAPTIVE_TOP_K` against the live tick.
+
+Missing or stale analysis means "no opinion". It is never computed inline as a fallback.
+
+The hot path itself was also sped up: EMA and RSI moved from Python loops to a C-level IIR filter (identical results to 1e-15), and the rolling std is now O(n). Same harness, original commit vs. now:
+
+| Tick → decision | p50 before | p50 after |
+|---|---|---|
+| Default strategy | 190 µs | 83 µs |
+| `adaptive` (opt-in) | — | 185 µs |
+
+### Latency on the dashboard
+
+The **Latency** chip in the header shows tick-to-decision p50/p95 and the dashboard round-trip. Click it for every stage, grouped by kind: hot path, broker round-trip, market-data age, event-loop lag and background worker. Each stage shows p50/p95/p99/max against a budget. Recording a sample costs about 0.2 µs. `GET /api/latency` returns the same data.
+
+**API**
+```bash
+curl localhost:8000/api/latency                # per-stage latency percentiles
+curl localhost:8000/api/quant/library          # strategies + track record
+curl localhost:8000/api/quant/regimes          # live regime per symbol
+curl localhost:8000/api/quant/analyze/BTC/USD  # council votes, Monte Carlo, pair
+curl localhost:8000/api/quant/portfolio        # VaR/CVaR, Sharpe/Sortino, drawdown
+# Let crypto bots pick strategies per moment:
+curl -X POST localhost:8000/api/strategies/class -H 'content-type: application/json' \
+     -d '{"asset_class":"crypto","strategy":"adaptive"}'
+```
+
+---
+
+## 🪜 Capital Mode: Classic vs Stair
+
+The **Capital mode** chip in the header switches between two ways of managing money. It takes effect on the next evaluation.
+
+- **Classic:** the bots trade a fixed budget.
+- **Stair (profit ratchet):** the deposit is split into *trading capital* and a *reserve* the engine never trades. Each step has a target, by default 2× the step's starting capital. When closed trades reach it, a share of that step's profit (default 50%) is **banked as income** and removed from the trading budget. The rest compounds into the next step.
+
+| Step | Trade with | Target (2×) | Bank 50% | Total banked |
+|---|---|---|---|---|
+| 1 | $500 | $1,000 | $250 | $250 |
+| 2 | $750 | $1,500 | $375 | $625 |
+| 3 | $1,125 | $2,250 | $562 | $1,187 |
+
+(Example: $1,000 deposit, 50% traded, $500 reserve untouched.)
+
+Rules:
+- **Progress counts realised PnL only.** Unrealised gains are never banked.
+- **Stair never raises risk to reach a target.** Strategies, stops and the risk dial are unchanged.
+- **If trading capital falls below the smallest order the engine can place, new entries stop.** The reserve and banked income are never used to top it up.
+- **Stair refuses to start with capital too small to trade.** At risk dial 4, one position is capped at 15% of capital, so crypto needs at least $100 of trading capital (stocks $200).
+- **The engine cannot move money.** Reserve and banked income stay as cash at the broker; withdraw them there.
+- **The ladder is saved to `api/data/capital_plan.json`,** so it survives restarts. Banked income carries over when a ladder is restarted.
+
+```bash
+curl localhost:8000/api/capital-plan
+curl -X POST localhost:8000/api/capital-plan -H 'content-type: application/json' \
+     -d '{"mode":"stair","deposit":1000,"deploy_pct":0.5,"target_multiple":2,"harvest_pct":0.5}'
+curl -X POST localhost:8000/api/capital-plan -d '{"mode":"classic"}' -H 'content-type: application/json'
+```
+
+---
+
+## 🏷️ Versioning
+
+Current version: **`0.0.0`** (pre-release).
+
+TradeFlow follows [Semantic Versioning](https://semver.org). While it stays on `0.0.x`, treat it as an experimental side project: anything may change. The version is **not bumped for every change**. It moves only when a significant update lands, and each bump gets a matching git tag (`vX.Y.Z`) and GitHub release.
+
+The version lives in `api/core/version.py` (backend, also reported by `GET /api/status`) and `app/package.json` (frontend). Keep them in sync when bumping.
+
+---
+
+## 🤝 Contributing
+
+TradeFlow is a **free, open-source, AI-based trading platform for your own personal use**, and pull requests to improve it are very welcome: bug fixes, new strategies, better risk controls, tests, documentation or UI work.
+
+1. Fork the repo and create a branch from `main`.
+2. Keep changes focused, and explain the *why* in the PR description. For trading logic, include how you tested it.
+3. Never commit secrets: `api/.env` and broker keys stay local.
+4. Only contribute code you wrote or that carries an MIT-compatible license. Please do not paste in code from GPL/AGPL projects.
+
+Found a problem but don't have a fix? Opening an issue helps too.
+
+## 📄 License
+
+Released under the [MIT License](LICENSE). Third-party services, models and data sources this project connects to (Alpaca, the Laya model, SEC EDGAR, eToro, StockTwits and others) are governed by their own terms, which you are responsible for following.

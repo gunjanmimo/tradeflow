@@ -4,6 +4,7 @@ import random
 import time
 from core.config import settings
 from core.state import state
+from core.latency import latency
 from engine.quant_matrix import quant_matrix
 from engine.decision_engine import decision_engine
 from engine.executor import executor
@@ -38,15 +39,17 @@ class MarketStreamRunner:
         THE SUB-SECOND CRITICAL PATH:
         Total processing time: < 0.15 milliseconds!
         """
-        t0 = time.time()
-        
-        # 1. Update In-Memory State (0.005 ms)
+        t0 = time.perf_counter_ns()
+
+        # 1. Update In-Memory State
         state.update_price(symbol, price, bid, ask, volume)
 
-        # 2. Run Quant Matrix (t1...tN indicators in < 0.05 ms)
+        # 2. Run Quant Matrix (t1...tN indicators)
+        t_q = time.perf_counter_ns()
         quant = quant_matrix.evaluate_symbol(symbol)
+        latency.record_ns("quant_matrix", t_q)
 
-        # 3. Read Pre-computed Laya Sentiment from RAM (0.001 ms)
+        # 3. Read Pre-computed Laya Sentiment from RAM
         sentiment = state.get_sentiment(symbol)
 
         # 4. If holding, dispatch tick to dedicated Sentinel Bot assigned to this trade
@@ -54,18 +57,22 @@ class MarketStreamRunner:
         if symbol in state.active_positions:
             from engine.sentinel_agent import sentinel_registry
             asyncio.create_task(sentinel_registry.dispatch_tick(symbol, price))
+            latency.record_ns("tick_total", t0)
         elif symbol in executor.pending_orders:
             # Order currently transmitting to broker; skip redundant evaluate until fill confirms
-            pass
+            latency.record_ns("tick_total", t0)
         else:
             # Run Manager Decision Engine for new entries
+            t_d = time.perf_counter_ns()
             decision = decision_engine.evaluate(symbol, quant, sentiment)
-            exec_time_us = (time.time() - t0) * 1_000_000
+            latency.record_ns("decision", t_d)
+            exec_time_us = (time.perf_counter_ns() - t0) / 1000.0
+            latency.record_us("tick_total", exec_time_us)
 
             # 5. If Actionable and bot is active, dispatch entry order
             if state.is_trading_active and decision.action == "BUY":
                 state.log_event(
-                    "SIGNAL", 
+                    "SIGNAL",
                     f"{decision.action} signal for {symbol} triggered in {exec_time_us:.0f}µs: {decision.reason}"
                 )
                 asyncio.create_task(executor.execute_decision(decision))
@@ -160,7 +167,10 @@ class MarketStreamRunner:
             cryptos = [s for s in state.watchlist if is_crypto_symbol(s)]
             if cryptos:
                 loop = asyncio.get_running_loop()
+                t_poll = time.perf_counter_ns()
                 binance_map = await loop.run_in_executor(None, fetch_binance_prices_sync, cryptos)
+                # A polled price is at least one round-trip old when it lands.
+                latency.record_ns("feed_crypto_poll", t_poll)
                 
                 for sym in cryptos:
                     binance_pair = sym.replace("/", "").replace("USD", "USDT")
@@ -191,6 +201,13 @@ class MarketStreamRunner:
             stock_stream = StockDataStream(settings.ALPACA_API_KEY, settings.ALPACA_SECRET_KEY)
 
             async def handle_stock_bar(bar):
+                # Bars are stamped with their START; the price is its close, a
+                # minute later. Age = now - bar end, i.e. pure delivery delay.
+                try:
+                    bar_end = bar.timestamp.timestamp() + 60.0
+                    latency.record_us("feed_stock_bar_age", max(time.time() - bar_end, 0.0) * 1e6)
+                except Exception:
+                    pass
                 await self.on_tick_received(
                     symbol=bar.symbol,
                     price=float(bar.close),

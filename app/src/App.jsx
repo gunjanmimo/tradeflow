@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { LatencyChip, LatencyPanel, QuantDeskCard } from './QuantPanels';
+import { CapitalModeChip, CapitalPlanPanel } from './CapitalPlan';
 import { HugeiconsIcon } from '@hugeicons/react';
 import { 
   Activity01Icon, 
@@ -68,7 +70,7 @@ const CircleDot = (props) => <HugeiconsIcon icon={CircleDotIcon} size="1em" {...
 const riskTone = (f) => (f <= 3 ? 'text-emerald-400' : f <= 6 ? 'text-amber-400' : 'text-rose-400');
 
 // Centered dialog with backdrop; closes on Escape or backdrop click
-function Modal({ title, icon, onClose, children }) {
+function Modal({ title, icon, onClose, children, wide = false }) {
   useEffect(() => {
     const onKey = (e) => e.key === 'Escape' && onClose();
     window.addEventListener('keydown', onKey);
@@ -79,7 +81,7 @@ function Modal({ title, icon, onClose, children }) {
       <div
         role="dialog"
         aria-modal="true"
-        className="w-full max-w-md rounded-2xl bg-[#0f1624] ring-1 ring-white/10 shadow-2xl shadow-black/50 p-6"
+        className={`w-full ${wide ? 'max-w-4xl' : 'max-w-md'} rounded-2xl bg-[#0f1624] ring-1 ring-white/10 shadow-2xl shadow-black/50 p-6`}
         onMouseDown={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-2">
@@ -146,6 +148,18 @@ export default function App() {
   const [riskDraft, setRiskDraft] = useState(4);
 
   const wsRef = useRef(null);
+
+  // --- Client-side latency: what the operator actually experiences ---
+  // Frame timing lives in refs (no re-render per frame); the visible numbers
+  // are pushed into state once per ping, every 2s.
+  const [isLatencyOpen, setIsLatencyOpen] = useState(false);
+  const [isCapitalOpen, setIsCapitalOpen] = useState(false);
+  const [clientLatency, setClientLatency] = useState({ rttMs: null, rttP95: null, frameMs: null, ageMs: null });
+  const pingSentRef = useRef(null);
+  const rttSamplesRef = useRef([]);
+  const lastFrameRef = useRef(null);
+  const frameGapRef = useRef(null);
+  const frameAgeRef = useRef(null);
 
   const isCrypto = (sym) => sym.includes('/USD') || ['BTC', 'ETH', 'SOL'].includes(sym);
 
@@ -222,8 +236,33 @@ export default function App() {
       };
 
       ws.onmessage = (event) => {
+        if (event.data === 'pong') {
+          if (pingSentRef.current !== null) {
+            const rtt = performance.now() - pingSentRef.current;
+            pingSentRef.current = null;
+            const samples = rttSamplesRef.current;
+            samples.push(rtt);
+            if (samples.length > 60) samples.shift();
+            const sorted = [...samples].sort((a, b) => a - b);
+            setClientLatency({
+              rttMs: rtt,
+              rttP95: sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))],
+              frameMs: frameGapRef.current,
+              ageMs: frameAgeRef.current,
+            });
+          }
+          return;
+        }
         try {
           const data = JSON.parse(event.data);
+          const now = performance.now();
+          if (lastFrameRef.current !== null) {
+            // Exponentially smoothed frame gap; a rising value means the UI is starved
+            const gap = now - lastFrameRef.current;
+            frameGapRef.current = frameGapRef.current === null ? gap : frameGapRef.current * 0.8 + gap * 0.2;
+          }
+          lastFrameRef.current = now;
+          if (data.server_time) frameAgeRef.current = Math.max(0, Date.now() - data.server_time * 1000);
           setTelemetry(data);
         } catch (e) {
           console.error("WS Parse error", e);
@@ -242,6 +281,15 @@ export default function App() {
 
     connect();
 
+    // Round-trip probe over the telemetry socket (server answers 'ping' with 'pong')
+    const pingTimer = setInterval(() => {
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        pingSentRef.current = performance.now();
+        ws.send('ping');
+      }
+    }, 2000);
+
     // Fetch experts
     fetch(`${API_BASE}/api/experts`)
       .then(res => res.json())
@@ -250,6 +298,7 @@ export default function App() {
 
     return () => {
       clearTimeout(reconnectTimer);
+      clearInterval(pingTimer);
       if (wsRef.current) wsRef.current.close();
     };
   }, []);
@@ -382,9 +431,19 @@ export default function App() {
               </span>
             </div>
 
+            {/* Latency chip -> opens latency breakdown */}
+            <LatencyChip latency={telemetry.latency} client={clientLatency} onClick={() => setIsLatencyOpen(true)} />
+
+            {/* Capital mode chip (classic / stair) -> opens capital plan */}
+            <CapitalModeChip plan={telemetry.capital_plan} onClick={() => setIsCapitalOpen(true)} />
+
             {/* Budget chip -> opens modal */}
             <button
-              onClick={() => { setBudgetInput(String(telemetry.budget?.allocated_capital || 10000)); setIsEditingBudget(true); }}
+              onClick={() => {
+                // In stair mode the ladder owns the budget; send the user to it instead
+                if (telemetry.capital_plan?.mode === 'stair') { setIsCapitalOpen(true); return; }
+                setBudgetInput(String(telemetry.budget?.allocated_capital || 10000)); setIsEditingBudget(true);
+              }}
               className="group flex items-center gap-2.5 rounded-xl px-3 py-1.5 bg-white/[0.03] ring-1 ring-white/10 hover:ring-cyan-400/50 hover:bg-cyan-400/5 transition-all text-left"
               title="Edit the capital the bot is allowed to trade"
             >
@@ -468,6 +527,25 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {/* Latency modal */}
+      {isLatencyOpen && (
+        <Modal
+          wide
+          title="Engine latency"
+          icon={<Zap className="w-4 h-4 text-violet-400" />}
+          onClose={() => setIsLatencyOpen(false)}
+        >
+          <LatencyPanel latency={telemetry.latency} client={clientLatency} analysisStatus={telemetry.analysis_status} />
+        </Modal>
+      )}
+
+      {/* Capital plan modal */}
+      {isCapitalOpen && (
+        <Modal wide title="Capital mode" icon={<Wallet className="w-4 h-4 text-emerald-400" />} onClose={() => setIsCapitalOpen(false)}>
+          <CapitalPlanPanel plan={telemetry.capital_plan} apiBase={API_BASE} cash={telemetry.account?.cash} onDone={() => setIsCapitalOpen(false)} />
+        </Modal>
+      )}
 
       {/* Budget modal */}
       {isEditingBudget && (
@@ -857,6 +935,14 @@ export default function App() {
               </table>
             </div>
           </div>
+
+          {/* Quant Desk: off-process analytics (regime, council, Monte Carlo, pairs, portfolio risk) */}
+          <QuantDeskCard
+            analysis={telemetry.analysis}
+            portfolio={telemetry.portfolio_analytics}
+            status={telemetry.analysis_status}
+            routing={telemetry.strategy_routing}
+          />
 
         </section>
 

@@ -86,6 +86,36 @@ class Settings(BaseSettings):
     MEMORY_AVOID_EXPECTANCY: float = -0.25
     MEMORY_ENABLED: bool = True
 
+    # --- Quant council (engine/strategies/council.py) ---
+    # Manager: refuse a new entry when regime-suited strategies clearly oppose it.
+    COUNCIL_ENTRY_CHECK: bool = True
+    # Trade bots: exit a held position when the council turns decisively bearish.
+    COUNCIL_EXIT_CHECK: bool = True
+    COUNCIL_MIN_VOTERS: int = 3
+    COUNCIL_SUPPORT_CONSENSUS: float = 0.20
+    COUNCIL_VETO_CONSENSUS: float = -0.25   # entry refused at or below this
+    COUNCIL_EXIT_CONSENSUS: float = -0.50   # held position closed at or below this
+
+    # --- Off-process analysis worker (engine/analysis) ---
+    # Everything heavier than a dict lookup runs in a separate process on this
+    # cadence, so it can never add latency to the tick path.
+    ANALYSIS_ENABLED: bool = True
+    ANALYSIS_INTERVAL_SECONDS: float = 1.0
+    # Results older than this are ignored by the hot path (treated as absent).
+    ANALYSIS_MAX_AGE_SECONDS: float = 10.0
+    # Adaptive strategy: how many worker-ranked candidates to evaluate per tick.
+    ADAPTIVE_TOP_K: int = 3
+    # Monte Carlo: minimum P(take-profit before stop) to allow an entry.
+    # 0 disables the gate (the probability is still computed and shown).
+    MC_MIN_TP_FIRST_PROB: float = 0.0
+    MC_PATHS: int = 1000
+
+    # --- Unfilled orders ---
+    # A crypto market order still open after this long is treated as unfillable,
+    # cancelled (engine-placed orders only) and the symbol put on cooldown.
+    STALE_ORDER_SECONDS: float = 60.0
+    UNFILLED_COOLDOWN_SECONDS: float = 3600.0
+
     # Server Settings
     HOST: str = "0.0.0.0"
     PORT: int = 8000
