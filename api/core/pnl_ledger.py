@@ -112,16 +112,6 @@ class DailyPnLLedger:
     def harvested_today(self) -> float:
         return round(float(self.roll().get("harvested_income") or 0.0), 2)
 
-    def on_harvest(self, symbol: str, pnl: float):
-        """A partial sell of a winner. Day profit, but not a closed trade."""
-        day = self.roll()
-        value = round(float(pnl), 2)
-        day["realized_pnl"] = round(float(day["realized_pnl"]) + value, 2)
-        day["gross_profit"] = round(float(day["gross_profit"]) + value, 2)
-        day["harvested_income"] = round(float(day["harvested_income"]) + value, 2)
-        day["harvests"] = int(day["harvests"]) + 1
-        self._save()
-
     def calculate_scenarios(self, active_positions: Dict[str, Any], realized_today: float) -> Dict[str, Any]:
         """Calculates potential PnL outcomes if all open positions hit TP vs SL."""
         best_case_gain = 0.0

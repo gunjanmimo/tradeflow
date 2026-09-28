@@ -222,25 +222,14 @@ def test_a_refused_entry_is_not_resent_every_cycle(world, monkeypatch):
     assert mgr.blocked_by["entry recently refused"] == 1
 
 
-def test_nothing_is_bought_before_the_trend_is_read(world, monkeypatch):
-    mgr, executed = world
-    from core.minute_bars import minute_bars
-    _price("AAPL")
-    minute_bars.drop("AAPL")                              # no history at all
-    state.update_price("AAPL", 100.0)
-    _signals(monkeypatch, {"AAPL": 0.95})
-    asyncio.run(mgr.run_cycle())
-    assert executed == []
-    assert mgr.blocked_by["trend: not enough history"] == 1
-
-
-def test_a_downtrend_is_not_bought_even_on_a_strong_signal(world, monkeypatch):
+def test_the_trend_read_does_not_gate_the_strategy(world, monkeypatch):
+    """The strategy owns every entry condition: a downtrend read is shown, not enforced."""
     mgr, executed = world
     _price("AAPL", step=-0.0005)                          # falling into the current price
     _signals(monkeypatch, {"AAPL": 0.95})
     asyncio.run(mgr.run_cycle())
-    assert executed == []
-    assert mgr.blocked_by["trend: downtrend"] == 1
+    assert executed == ["AAPL"]
+    assert mgr.watch[0]["trend"]["label"] in ("downtrend", "range", "unknown")
 
 
 def test_picks_carry_the_planned_dollars_and_trend(world, monkeypatch):

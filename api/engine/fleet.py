@@ -11,11 +11,10 @@ so one agent failing leaves the rest running.
   Trend analyst  TrendAnalystAgent         every 1s    reads 1-minute bars + daily bars for every
                                                        watched and held symbol (engine/trend.py);
                                                        logs trend flips and reversals
-  Trader         engine/portfolio_manager  every 2s    trend-confirmed entry signals, ranked by
+  Trader         engine/portfolio_manager  every 2s    the strategy's entry signals, ranked by
                                                        conviction and diversification, sized, bought
-  Position mgr   PositionManagerAgent      every 2s    per held position, on the trend:
-                                                       BUY more / SELL part / HOLD / CLOSE
-  Sentinels      engine/sentinel_agent.py  every tick  stop, target, stale price, end of day
+  Sentinels      engine/sentinel_agent.py  every tick  stop, target, strategy exit, stale price,
+                                                       end of day
 
 Every order still goes through the executor and its gates.
 """
@@ -188,105 +187,10 @@ class CuratorAgent(Agent):
 
 # ---------------------------------------------------------------------------
 
-class PositionManagerAgent(Agent):
-    """
-    Trend-driven management of each open position, between the sentinel's
-    tick-level exits:
-
-      CLOSE  the trend has turned down with confidence
-      SELL   a winner's trend is fading or reversing: sell TRIM_FRACTION, once
-      BUY    a winner in a strong, confident uptrend, up SCALE_IN_MIN_R x its
-             risk: add SCALE_IN_FRACTION of the original investment, once
-      HOLD   otherwise
-
-    The trend CLOSE waits out an equity's minimum hold, as the other discretionary
-    exits do; the stop protects the position meanwhile. Trims and adds do not.
-    """
-    name = "Position manager"
-    role = "Decides BUY more / SELL part / HOLD / CLOSE for each open position from its trend"
-
-    def __init__(self):
-        super().__init__()
-        self._logged: Dict[tuple, float] = {}
-
-    @property
-    def interval(self) -> float:
-        return settings.POSITION_MANAGER_INTERVAL_SECONDS
-
-    @property
-    def enabled(self) -> bool:
-        return settings.POSITION_MANAGER_ENABLED
-
-    def decide(self, sym: str, pos: Dict[str, Any], r) -> tuple:
-        """(action, reason, fraction) for one position. Pure: no orders."""
-        price = float(pos.get("current_price") or pos.get("avg_entry_price") or 0.0)
-        entry = float(pos.get("avg_entry_price") or price)
-        qty = float(pos.get("qty") or 0.0)
-        if not r.ready or entry <= 0 or qty <= 0:
-            return "HOLD", "learning the trend: " + (r.reasons[0] if r.reasons else ""), 0.0
-        pnl_pct = (price - entry) / entry
-        stop = pos.get("stop_loss")
-        risk_ps = (entry - float(stop)) if stop is not None and float(stop) < entry else entry * 0.01
-        r_mult = (price - entry) / risk_ps if risk_ps > 0 else 0.0
-
-        in_min_hold = False
-        if pos.get("opened_at"):
-            in_min_hold = (time.time() - float(pos["opened_at"])) / 60 < settings.STOCK_SCORE_MIN_HOLD_MINUTES
-        trend_txt = f"trend {r.label} {r.direction:+.2f} (conf {r.confidence:.2f})"
-
-        if r.direction <= -settings.TREND_EXIT_DIRECTION and r.confidence >= 0.5 and not in_min_hold:
-            return "CLOSE", f"Trend turned down: {trend_txt}, P&L {pnl_pct * 100:+.2f}%", 1.0
-        if (pnl_pct > 0 and not pos.get("trimmed")
-                and (r.reversal_down or r.direction <= -settings.TREND_TRIM_DIRECTION)):
-            why = "micro trend reversing" if r.reversal_down else "trend fading"
-            return ("SELL", f"Locking gains, {why}: {trend_txt}, P&L {pnl_pct * 100:+.2f}%",
-                    settings.TRIM_FRACTION)
-        if (settings.SCALE_IN_ENABLED and not pos.get("scaled_in")
-                and r.direction >= settings.SCALE_IN_DIRECTION and r.confidence >= 0.6
-                and not r.reversal_down and r_mult >= settings.SCALE_IN_MIN_R):
-            return "BUY", f"Adding to a winner at {r_mult:.1f}R: {trend_txt}", settings.SCALE_IN_FRACTION
-        if in_min_hold and r.direction <= -settings.TREND_EXIT_DIRECTION:
-            return "HOLD", f"{trend_txt}, but inside the minimum hold; the stop protects it", 0.0
-        return "HOLD", f"{trend_txt}, P&L {pnl_pct * 100:+.2f}%", 0.0
-
-    async def step(self):
-        from engine.executor import executor
-        counts = {"HOLD": 0, "BUY": 0, "SELL": 0, "CLOSE": 0}
-        for sym, pos in list(state.active_positions.items()):
-            if sym in executor.closing_orders or sym in executor.pending_exits or sym in executor.pending_orders:
-                continue
-            r = trend_board.read(sym)
-            action, reason, fraction = self.decide(sym, pos, r)
-            counts[action] += 1
-            pos["fleet_action"] = action
-            pos["fleet_reason"] = reason
-            pos["trend"] = r.brief()
-            if action == "HOLD":
-                continue
-            if action == "BUY" and not state.is_trading_active:
-                continue
-            # The executor may refuse quietly (outside regular hours, at a cap) and
-            # the same call comes back every cycle: log it once a minute, not each time.
-            now = time.time()
-            if now - self._logged.get((sym, action), 0.0) >= 60.0:
-                self._logged[(sym, action)] = now
-                self.act(sym, action, reason)
-                state.log_event("POSITION_MGR", f"{action} {sym}: {reason}")
-            await executor.execute_decision(TradeDecision(
-                symbol=sym, action=action, close=action == "CLOSE", fraction=fraction,
-                close_prob=1.0 if action == "CLOSE" else 0.0, reason=f"[Position manager] {reason}"))
-        n = len(state.active_positions)
-        self.summary = (f"{n} position{'s' if n != 1 else ''}: "
-                        + ", ".join(f"{v} {k}" for k, v in counts.items() if v) if n else "no open positions")
-
-
-# ---------------------------------------------------------------------------
-
 class Fleet:
     def __init__(self):
         self.trend = TrendAnalystAgent()
         self.curator = CuratorAgent()
-        self.positions = PositionManagerAgent()
 
     async def start(self):
         from engine.portfolio_manager import portfolio_manager
@@ -301,11 +205,10 @@ class Fleet:
         await self.trend.start()
         await self.curator.start()
         await portfolio_manager.start()
-        await self.positions.start()
 
     async def stop(self):
         from engine.portfolio_manager import portfolio_manager
-        for a in (self.positions, self.curator, self.trend):
+        for a in (self.curator, self.trend):
             await a.stop()
         await portfolio_manager.stop()
 
@@ -339,8 +242,7 @@ class Fleet:
             "error": None, "last_action": None,
         }
         return {
-            "agents": [scout, self.curator.card(), self.trend.card(), trader,
-                       self.positions.card(), sentinels],
+            "agents": [scout, self.curator.card(), self.trend.card(), trader, sentinels],
             "trends": {s: r.brief() for s, r in trend_board.reads.items()},
             "bars": minute_bars.status(),
         }

@@ -149,7 +149,6 @@ class MarketStreamRunner:
         sentiment = state.get_sentiment(symbol)
 
         # 4. If holding, dispatch tick to dedicated Sentinel Bot assigned to this trade
-        from engine.executor import executor
         if symbol in state.active_positions:
             from engine.sentinel_agent import sentinel_registry
             asyncio.create_task(sentinel_registry.dispatch_tick(symbol, price))

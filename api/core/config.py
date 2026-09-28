@@ -106,14 +106,11 @@ class Settings(BaseSettings):
     MEMORY_ENABLED: bool = True
 
     # --- Quant council (engine/strategies/council.py) ---
-    # Manager: refuse a new entry when regime-suited strategies clearly oppose it.
-    COUNCIL_ENTRY_CHECK: bool = True
-    # Trade bots: exit a held position when the council turns decisively bearish.
-    COUNCIL_EXIT_CHECK: bool = True
+    # Information only: the council's verdict is shown on the dashboard but no
+    # longer vetoes entries or closes positions (it never showed an edge).
     COUNCIL_MIN_VOTERS: int = 3
     COUNCIL_SUPPORT_CONSENSUS: float = 0.20
-    COUNCIL_VETO_CONSENSUS: float = -0.25   # entry refused at or below this
-    COUNCIL_EXIT_CONSENSUS: float = -0.50   # held position closed at or below this
+    COUNCIL_VETO_CONSENSUS: float = -0.25   # verdict "oppose" at or below this
 
     # --- Off-process analysis worker (engine/analysis) ---
     # Everything heavier than a dict lookup runs in a separate process on this
@@ -124,9 +121,7 @@ class Settings(BaseSettings):
     ANALYSIS_MAX_AGE_SECONDS: float = 10.0
     # Adaptive strategy: how many worker-ranked candidates to evaluate per tick.
     ADAPTIVE_TOP_K: int = 3
-    # Monte Carlo: minimum P(take-profit before stop) to allow an entry.
-    # 0 disables the gate (the probability is still computed and shown).
-    MC_MIN_TP_FIRST_PROB: float = 0.0
+    # Monte Carlo P(take-profit before stop), shown on the dashboard.
     MC_PATHS: int = 1000
 
     # --- Discovery & diversification (engine/discovery.py, engine/diversification.py) ---
@@ -231,76 +226,15 @@ class Settings(BaseSettings):
     MANAGER_FIT_WEIGHT: float = 0.5
 
     # --- Trend analyst (engine/trend.py, core/minute_bars.py) ---
-    # Nothing is bought until a symbol has TREND_MIN_BARS one-minute bars behind
-    # it (backfilled from Alpaca, so normally at once) and its trend reads up.
+    # Reads each symbol's trend for the dashboard. It no longer gates entries:
+    # the strategy that decides an entry owns all of its conditions, so what the
+    # backtester and the RL environment replay is exactly what trades.
     MINUTE_BARS_BACKFILL: bool = True
     TREND_INTERVAL_SECONDS: float = 1.0
     TREND_MIN_BARS: int = 20
     TREND_SHORT_BARS: int = 15
     TREND_LONG_BARS: int = 60
     TREND_UP: float = 0.30              # |direction| at which the label becomes up/down
-    TREND_ENTRY_MIN: float = 0.25       # new entries need at least this direction
-
-    # --- Position manager: trend-driven BUY more / SELL part / HOLD / CLOSE ---
-    # Tick-level stop, target, stale-price and end-of-day exits stay with each
-    # position's sentinel; this agent acts on the trend, every few seconds.
-    POSITION_MANAGER_ENABLED: bool = True
-    POSITION_MANAGER_INTERVAL_SECONDS: float = 2.0
-    TREND_EXIT_DIRECTION: float = 0.45  # close when direction <= -this (confident)
-    TREND_TRIM_DIRECTION: float = 0.25  # trim a winner when direction <= -this, or on a reversal
-    TRIM_FRACTION: float = 0.5
-
-    # Profit harvest: whenever an open position shows ANY profit at the bid (the
-    # price a sell fills at), sell PROFIT_HARVEST_FRACTION of it and book the gain
-    # as day income. Income is ring-fenced: never traded again, never cushions a
-    # loss. The remainder is harvested again only on new profit (a bid above the
-    # last harvest). PROFIT_HARVEST_USD > 0 sets a minimum; 0 = any profit.
-    # Never fires on a loss. A position too small to split is held whole.
-    PROFIT_HARVEST_ENABLED: bool = True
-    PROFIT_HARVEST_USD: float = 0.0
-    PROFIT_HARVEST_FRACTION: float = 0.5
-    # A harvest must bank at least this much (net of fees): no $0.00 sells.
-    PROFIT_HARVEST_MIN_INCOME: float = 0.01
-    PROFIT_HARVEST_RETRY_SECONDS: float = 10.0  # e.g. a stock outside regular hours
-    # Stocks: harvest in fractional shares where Alpaca allows it (a 1-share
-    # winner sells 0.5), down to this many decimals and at least this notional.
-    HARVEST_FRACTION_DECIMALS: int = 4
-    HARVEST_MIN_FRACTIONAL_NOTIONAL: float = 1.0
-    SCALE_IN_ENABLED: bool = True
-    SCALE_IN_DIRECTION: float = 0.50    # add to a winner only in a strong, confident uptrend
-    SCALE_IN_MIN_R: float = 1.0         # ...already up at least 1x its initial risk
-    SCALE_IN_FRACTION: float = 0.5      # add this share of the original investment, once
-
-    # --- Loss recovery (engine/loss_recovery.py) ---
-    # A losing position is not dumped on one print through its stop or on a
-    # headline alone. The stop has to hold for STOP_CONFIRM_SECONDS, or the price
-    # has to fall STOP_DISASTER_EXTRA_R x the stop distance further (the broker's
-    # bracket leg sits there). Bearish news closes a loser only when the trend
-    # agrees. A stalled loser gets one rescue add that never moves the stop and
-    # caps the loss at RECOVERY_MAX_RISK_MULT x the original risk, and once it is
-    # back above break-even its stop is locked there.
-    STOP_CONFIRM_ENABLED: bool = True
-    STOP_CONFIRM_SECONDS: float = 20.0
-    STOP_DISASTER_EXTRA_R: float = 0.5
-    RECOVERY_ENABLED: bool = True
-    RECOVERY_ADD_ENABLED: bool = True
-    RECOVERY_ADD_MIN_R: float = 0.4       # rescue only once down at least this x the stop distance
-    RECOVERY_ADD_MAX_R: float = 0.8       # ...and not this close to the stop
-    RECOVERY_ADD_FRACTION: float = 0.5    # add at most this share of the current quantity
-    RECOVERY_MAX_RISK_MULT: float = 1.25  # loss at the stop after the add <= this x original risk
-    RECOVERY_MIN_MICRO: float = 0.0       # micro trend must be at least flat: the fall has stalled
-    RECOVERY_RETRY_SECONDS: float = 30.0
-    RECOVERY_BREAKEVEN_BUFFER_PCT: float = 0.10  # lock the stop this far above break-even (fees, spread)
-
-    # --- Trade scorer (ml/): a small LSTM that learns from every closed trade ---
-    # off     not consulted
-    # shadow  scores every entry candidate and records it; decides nothing (default)
-    # rank    also blends the score into the manager's ranking (ML_RANK_WEIGHT)
-    # gate    also skips candidates scored under the model's own threshold
-    # Experience (entry bars + final net result) is recorded in every mode but off.
-    ML_MODE: str = Field(default=os.getenv("ML_MODE", "shadow"))
-    ML_RECORD_EXPERIENCE: bool = True
-    ML_RANK_WEIGHT: float = 0.3
 
     # --- Curator: moves discovery's best picks onto the watchlist ---
     CURATOR_INTERVAL_SECONDS: float = 30.0

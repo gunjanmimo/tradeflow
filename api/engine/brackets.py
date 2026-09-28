@@ -87,7 +87,6 @@ def ensure(position: Dict, price: Optional[float] = None, atr: Optional[float] =
     if entry <= 0:
         return position
 
-    ref = float(price or position.get("current_price") or entry)
     sl, tp = position.get("stop_loss"), position.get("take_profit")
 
     if not is_valid(entry, sl, tp):
@@ -106,30 +105,3 @@ def ensure(position: Dict, price: Optional[float] = None, atr: Optional[float] =
         position["bracket_source"] = "repaired"
 
     return position
-
-
-def trail(position: Dict, highest_price: float, entry_price: float,
-          activate_at_pct: float = 0.008, give_back_pct: float = 0.007) -> Optional[float]:
-    """
-    Trailing stop, returned only when it would raise the existing stop.
-
-    Rounded at the asset's own precision -- the previous `round(high * 0.993, 2)`
-    evaluated to 0.00 for any sub-cent asset, so the trail silently never engaged.
-    """
-    if entry_price <= 0 or highest_price <= 0:
-        return None
-    profit_pct = (highest_price - entry_price) / entry_price
-    if profit_pct < activate_at_pct:
-        return None
-    candidate = round_price(highest_price * (1.0 - give_back_pct), highest_price)
-    current = position.get("stop_loss")
-    try:
-        current_val = float(current) if current is not None else None
-    except (TypeError, ValueError):
-        current_val = None
-    if current_val is not None and candidate <= current_val:
-        return None
-    # Never trail a stop above the price it is protecting
-    if candidate >= highest_price:
-        return None
-    return candidate

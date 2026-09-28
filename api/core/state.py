@@ -76,13 +76,6 @@ class TradeDecision:
     # A protective exit (stale price, end of day) that must not wait out the
     # normal retry backoff: see settings.FORCED_EXIT_MAX_WAIT_SECONDS.
     forced: bool = False
-    # SELL: share of the position to sell (0.5 = trim half). CLOSE is always all.
-    fraction: float = 1.0
-    # SELL from the profit harvest: the gain is booked as ring-fenced day income.
-    harvest: bool = False
-    # BUY from loss recovery: a one-time add of rescue_qty to a losing position.
-    rescue: bool = False
-    rescue_qty: float = 0.0
 
 def ny_date(ts: Optional[float] = None) -> str:
     """The New York calendar date: the US trading day, whatever the host's timezone."""
@@ -217,12 +210,9 @@ class InMemoryState:
         # --- Portfolio-level risk tracking (drives the circuit breakers) ---
         # Realised PnL booked today, reset at the start of each trading day.
         self.realized_pnl_today: float = 0.0
-        # Part of realized_pnl_today taken as ring-fenced day income by the
-        # profit harvest. Excluded from the daily-loss breaker.
+        # Income the (removed) profit harvest set aside earlier today, read back
+        # from the ledger so the daily-loss breaker still excludes it.
         self.harvested_today: float = 0.0
-        # Stocks Alpaca trades in fractions (from the asset catalog at start-up):
-        # a profit harvest sells half of a one-share winner as 0.5 share.
-        self.fractionable_symbols: set = set()
         self.trading_day: str = ny_date()
         # High-water mark of equity, for drawdown measurement.
         self.peak_equity: float = 0.0
@@ -670,21 +660,6 @@ class InMemoryState:
         if last <= 0 or eq <= 0 or self.allocated_capital <= 0:
             return 0.0
         return max(0.0, round((last - eq) / self.allocated_capital * 100.0, 3))
-
-    def book_harvested_income(self, symbol: str, pnl: float):
-        """
-        Books a profit-harvest gain as day income. It counts in today's P&L but
-        never in the trading budget: not in classic's realised ledger, not in a
-        stair stage's capital, and not as a cushion against the daily loss limit.
-        """
-        self.roll_trading_day_if_needed()
-        value = round(float(pnl), 2)
-        self.realized_pnl_today = round(self.realized_pnl_today + value, 2)
-        self.harvested_today = round(self.harvested_today + value, 2)
-        from core.capital_plan import capital_plan
-        capital_plan.on_harvest(symbol, value)
-        from core.pnl_ledger import pnl_ledger
-        pnl_ledger.on_harvest(symbol, value)
 
     def update_peak_equity(self):
         # Measured on the bots' own equity. Against the whole broker account a

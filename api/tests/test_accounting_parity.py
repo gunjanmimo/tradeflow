@@ -148,7 +148,7 @@ def test_backtest_atr_matches_the_live_formula():
     rng = np.random.default_rng(0)
     c = 100 + np.cumsum(rng.normal(0, 0.1, 120))
     bars = [(29_000_000 + i, c[i], c[i] + 0.05, c[i] - 0.07, c[i], 100.0) for i in range(120)]
-    tape = sim.Tape("AAPL", bars, sim.Costs())
+    tape = sim.Tape("AAPL", bars)
     i = 100
     expect = QuantMatrix.true_range_atr(tape.h[i - 59:i + 1], tape.l[i - 59:i + 1], tape.c[i - 59:i + 1])
     assert tape.atr(i, tape.c[i]) == pytest.approx(expect)

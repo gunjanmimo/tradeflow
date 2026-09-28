@@ -279,15 +279,6 @@ class CapitalPlanManager:
         self._apply_budget()
         self._save()
 
-    def on_harvest(self, symbol: str, pnl: float):
-        """
-        Profit-harvest income. Deliberately NOT added to classic_realized or
-        realized_in_stage: it must neither raise the budget, compound into a
-        stage, nor offset a later loss. It stays as untraded broker cash.
-        """
-        self.plan.harvested_income = round(self.plan.harvested_income + float(pnl), 2)
-        self._save()
-
     def entry_block_reason(self) -> Optional[str]:
         p = self.plan
         if p.mode == "stair" and p.halted:

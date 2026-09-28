@@ -249,14 +249,8 @@ async def lifespan(app: FastAPI):
     await discovery.start()
     loop_monitor_task = asyncio.create_task(monitor_event_loop())
 
-    # Trade scorer: import torch and load the model in a thread now (~0.8s), so
-    # the manager's first cycle does not stall the event loop doing it.
-    if settings.ML_MODE != "off":
-        from ml.model import scorer
-        await asyncio.get_running_loop().run_in_executor(None, lambda: scorer.ready)
-
-    # 12. Agent fleet: trend analyst (reads the time series first), curator,
-    # trader (the portfolio manager) and position manager.
+    # 12. Agent fleet: trend analyst (reads the time series first), curator and
+    # trader (the portfolio manager).
     await fleet.start()
 
     logger.info("Tradeflow sub-second trading engine is LIVE!")
@@ -553,12 +547,11 @@ async def quant_library():
         "council_settings": {
             "analysis_interval_s": settings.ANALYSIS_INTERVAL_SECONDS,
             "adaptive_top_k": settings.ADAPTIVE_TOP_K,
-            "mc_min_tp_first_prob": settings.MC_MIN_TP_FIRST_PROB,
-            "entry_check": settings.COUNCIL_ENTRY_CHECK,
-            "exit_check": settings.COUNCIL_EXIT_CHECK,
+            # The council is information only: it never vetoes or closes a trade.
+            "entry_check": False,
+            "exit_check": False,
             "min_voters": settings.COUNCIL_MIN_VOTERS,
             "veto_consensus": settings.COUNCIL_VETO_CONSENSUS,
-            "exit_consensus": settings.COUNCIL_EXIT_CONSENSUS,
         },
     }
 
@@ -591,14 +584,6 @@ async def quant_analyze(symbol: str):
 async def quant_portfolio():
     """Portfolio analytics: ledger performance ratios and open-position VaR/CVaR."""
     return state.portfolio_analytics or {"status": "warming up"}
-
-
-@app.get("/api/ml")
-async def get_ml():
-    """Trade scorer: mode, whether a model is loaded, its holdout results, and experience recorded."""
-    from ml.model import scorer
-    from ml.experience import experience
-    return {"mode": settings.ML_MODE, "model": scorer.status(), "experience": experience.status()}
 
 
 @app.get("/api/latency")
