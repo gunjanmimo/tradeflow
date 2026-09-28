@@ -3,3 +3,5 @@
 # For a CUDA build pick the matching wheel from https://pytorch.org/get-started/locally/
 -r requirements.txt
 torch>=2.3
+# Few-shot research (python -m fewshot): Chronos-Bolt, a small pretrained forecaster
+chronos-forecasting>=2.0
