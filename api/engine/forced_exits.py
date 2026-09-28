@@ -1,7 +1,13 @@
 """
 Exits that are not a trading opinion: the position has to go regardless of what
-its strategy thinks. Both are checked by the position's sentinel on every tick
-and on its one-second heartbeat, and both bypass the equity minimum hold.
+its strategy thinks. All are checked by the position's sentinel on every tick
+and on its one-second heartbeat, and all bypass the equity minimum hold.
+
+  dust          The position is worth less than the smallest order the engine
+                places (DUST_POSITION_USD). The engine only buys whole shares, so
+                such a position is a leftover (fractions sold off by the old
+                profit harvest, or a manual trade): its P&L rounds to nothing and
+                managing it only costs attention. It is closed at once.
 
   stale price   The price has not changed for STALE_PRICE_EXIT_SECONDS. A position
                 nobody is quoting has no live stop and no live target, and ties
@@ -63,7 +69,18 @@ def check(symbol: str, pos: Dict[str, Any], pnl_pct: float, watching_since: floa
           now: Optional[float] = None) -> Optional[str]:
     """The first forced-exit reason that applies to this position, or None."""
     since = max(float(watching_since or 0.0), float(pos.get("opened_at") or 0.0))
-    return end_of_day_exit(symbol) or stale_price_exit(symbol, pnl_pct, since, now)
+    return (dust_exit(pos) or end_of_day_exit(symbol)
+            or stale_price_exit(symbol, pnl_pct, since, now))
+
+
+def dust_exit(pos: Dict[str, Any]) -> Optional[str]:
+    qty = float(pos.get("qty") or 0.0)
+    price = float(pos.get("current_price") or pos.get("avg_entry_price") or 0.0)
+    value = qty * price
+    if qty <= 0 or price <= 0 or value >= settings.DUST_POSITION_USD:
+        return None
+    return (f"dust position: {qty:g} shares worth ${value:,.2f}, below the ${settings.DUST_POSITION_USD:,.0f} "
+            f"smallest order; closing it rather than managing it")
 
 
 def telemetry(symbol: str) -> Dict[str, Any]:

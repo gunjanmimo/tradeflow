@@ -44,7 +44,8 @@ def world(monkeypatch):
     monkeypatch.setitem(state.quant_metrics, SYM, QuantMetrics(symbol=SYM, rsi=50.0, atr=1.0))
     state.price_moved_at[SYM] = time.time()
     pos = {"symbol": SYM, "qty": 10.0, "avg_entry_price": ENTRY, "current_price": ENTRY,
-           "stop_loss": 99.0, "take_profit": 102.0, "opened_at": time.time() - 600}
+           "stop_loss": 99.0, "take_profit": 102.0, "opened_at": time.time() - 600,
+           "entry_strategy": "stub"}
     state.active_positions[SYM] = pos
     bot = PositionSentinelBot(SYM, pos)
     yield bot, sent, strat
@@ -96,3 +97,21 @@ def test_no_partial_sells_or_adds_on_a_winner(world):
     _run(bot, 100.2, 100.8, 101.5)
     assert sent == []
     assert state.active_positions[SYM]["qty"] == 10.0
+
+
+def test_dust_is_closed_at_once(world):
+    """A leftover fraction (here 0.0079 shares, ~$0.80) is closed, not managed."""
+    bot, sent, _ = world
+    state.active_positions[SYM]["qty"] = 0.0079
+    _run(bot, 100.1)
+    assert len(sent) == 1 and "dust position" in sent[0].reason and sent[0].forced
+
+
+def test_an_inherited_position_is_not_judged_by_a_policy_that_never_opened_it(world):
+    bot, sent, strat = world
+    strat["close"] = True                              # the policy would say "flat"
+    state.active_positions[SYM].pop("entry_strategy")
+    _run(bot, 100.4)
+    assert sent == [] and state.active_positions[SYM]["inherited"]
+    _run(bot, 98.9)                                     # the stop still protects it
+    assert len(sent) == 1 and "Stop-loss" in sent[0].reason

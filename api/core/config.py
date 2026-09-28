@@ -200,6 +200,9 @@ class Settings(BaseSettings):
     # and the stop / other exits keep ownership.
     STALE_PRICE_EXIT_SECONDS: float = 120.0
     STALE_PRICE_MAX_LOSS_PCT: float = 5.0
+    # A position worth less than this is a leftover (the engine buys whole shares
+    # and never smaller than engine/risk_guard.MIN_ORDER_DOLLARS): close it.
+    DUST_POSITION_USD: float = 30.0
     # A forced exit never sits waiting longer than this: a failed close is retried
     # within it, whatever the normal backoff would have been.
     FORCED_EXIT_MAX_WAIT_SECONDS: float = 50.0

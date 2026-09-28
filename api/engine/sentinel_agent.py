@@ -11,6 +11,11 @@ A position leaves by exactly one of these, first match wins:
               window (engine/forced_exits.py).
   strategy    the strategy that opened the position says its thesis is gone
               (its evaluate_exit), e.g. the RL policy choosing to go flat.
+              Only for positions this engine opened: an inherited position (a
+              manual trade, or one from before a restart) has no entry
+              strategy, and a policy judging a position it never opened would
+              read inputs it was not trained on. Stop, target, dust, stale-price
+              and the end-of-day flatten still apply to it.
 
 That is the whole exit policy, and the backtester and the RL environment model
 exactly these rules. The earlier stack -- profit harvest on any uptick, a
@@ -123,6 +128,9 @@ class PositionSentinelBot:
         forced = forced_exits.check(self.symbol, pos, pnl_pct, self.assigned_at)
         if forced is not None:
             return f"Forced exit: {forced}"
+        if not pos.get("entry_strategy"):
+            pos["inherited"] = True
+            return None
         try:
             from engine.strategies import registry
             from engine.strategies.context import build_context
