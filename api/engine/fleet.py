@@ -15,6 +15,8 @@ so one agent failing leaves the rest running.
                                                        conviction and diversification, sized, bought
   Sentinels      engine/sentinel_agent.py  every tick  stop, target, strategy exit, stale price,
                                                        end of day
+  Learner        engine/learner.py         after close retrains the RL policy on the day's bars;
+                                                       deploys it only if it beats the current one
 
 Every order still goes through the executor and its gates.
 """
@@ -118,7 +120,7 @@ class TrendAnalystAgent(Agent):
         return settings.TREND_INTERVAL_SECONDS
 
     def symbols(self) -> List[str]:
-        return sorted(set(state.watchlist) | set(state.active_positions))
+        return sorted(set(state.watchlist) | set(state.active_positions) | set(settings.CONTEXT_SYMBOLS))
 
     async def step(self):
         syms = self.symbols()
@@ -189,8 +191,10 @@ class CuratorAgent(Agent):
 
 class Fleet:
     def __init__(self):
+        from engine.learner import learner
         self.trend = TrendAnalystAgent()
         self.curator = CuratorAgent()
+        self.learner = learner
 
     async def start(self):
         from engine.portfolio_manager import portfolio_manager
@@ -205,10 +209,11 @@ class Fleet:
         await self.trend.start()
         await self.curator.start()
         await portfolio_manager.start()
+        await self.learner.start()
 
     async def stop(self):
         from engine.portfolio_manager import portfolio_manager
-        for a in (self.curator, self.trend):
+        for a in (self.learner, self.curator, self.trend):
             await a.stop()
         await portfolio_manager.stop()
 
@@ -242,7 +247,8 @@ class Fleet:
             "error": None, "last_action": None,
         }
         return {
-            "agents": [scout, self.curator.card(), self.trend.card(), trader, sentinels],
+            "agents": [scout, self.curator.card(), self.trend.card(), trader, sentinels,
+                       self.learner.card()],
             "trends": {s: r.brief() for s, r in trend_board.reads.items()},
             "bars": minute_bars.status(),
         }

@@ -586,6 +586,38 @@ async def quant_portfolio():
     return state.portfolio_analytics or {"status": "warming up"}
 
 
+class RLModeRequest(BaseModel):
+    mode: str                      # auto | shadow | live | off
+
+
+@app.get("/api/rl")
+async def get_rl():
+    """The RL policy: mode, promotion gate, walk-forward results vs baselines, learning curve, decisions."""
+    from rl.live import runtime
+    from engine.learner import learner
+    return {**runtime.status(), "learner": learner.card(), "torch_available": learner.has_torch()}
+
+
+@app.post("/api/rl/mode")
+async def set_rl_mode(req: RLModeRequest):
+    """auto (trade only an approved policy), shadow (never trade), live (trade any deployed policy), off."""
+    from rl.live import runtime
+    try:
+        runtime.set_mode(req.mode)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    state.log_event("RL", f"RL mode set to {runtime.mode}"
+                          + (" (trades an unapproved policy)" if runtime.mode == "live" and not runtime.policy.approved else ""))
+    return {"mode": runtime.mode, "may_trade": runtime.may_trade()}
+
+
+@app.post("/api/rl/retrain")
+async def retrain_rl():
+    """Starts a retrain now (download new bars, warm-start PPO, champion/challenger deploy)."""
+    from engine.learner import learner
+    return {"result": await learner.retrain()}
+
+
 @app.get("/api/latency")
 async def get_latency():
     """Latency percentiles per stage (hot path, broker, feed, event loop, worker)."""

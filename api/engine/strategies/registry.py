@@ -17,6 +17,7 @@ from engine.strategies.stock_score import StockScoreStrategy
 from engine.strategies.mean_reversion import MeanReversionStrategy
 from engine.strategies.library import LIBRARY
 from engine.strategies.adaptive import AdaptiveStrategy
+from engine.strategies.rl_ppo import RLPolicyStrategy
 
 logger = logging.getLogger("tradeflow.strategies")
 
@@ -25,6 +26,7 @@ EQUITY = "equity"
 # Instantiated once; strategies are stateless apart from their params.
 _STRATEGIES: Dict[str, Strategy] = {
     s.name: s for s in (
+        RLPolicyStrategy(),
         NewsCatalystStrategy(),
         StockScoreStrategy(),
         MeanReversionStrategy(),
@@ -33,7 +35,10 @@ _STRATEGIES: Dict[str, Strategy] = {
     )
 }
 
-DEFAULT_BY_CLASS: Dict[str, str] = {EQUITY: "stock_score"}
+# The PPO policy decides by default. It places orders only once a trained policy
+# has passed its promotion gate (settings.RL_MODE = "auto"); until then it runs
+# in shadow mode and the platform stays flat.
+DEFAULT_BY_CLASS: Dict[str, str] = {EQUITY: "rl_ppo"}
 
 
 def asset_class(symbol: str) -> str:
@@ -54,7 +59,7 @@ def is_compatible(name: str, klass: str = EQUITY) -> bool:
 
 def resolve(symbol: str, class_defaults: Dict[str, str],
             overrides: Dict[str, str]) -> Strategy:
-    """The override for this symbol, else the configured default, else stock_score."""
+    """The override for this symbol, else the configured default, else rl_ppo."""
     name = overrides.get(symbol)
     if name and name in _STRATEGIES:
         return _STRATEGIES[name]

@@ -236,6 +236,23 @@ class Settings(BaseSettings):
     TREND_LONG_BARS: int = 60
     TREND_UP: float = 0.30              # |direction| at which the label becomes up/down
 
+    # --- RL policy (rl/, engine/strategies/rl_ppo.py) ---
+    # auto    trades (paper) only when the deployed policy passed its promotion
+    #         gate on unseen days; otherwise runs in shadow mode (default)
+    # shadow  decides and logs every decision, never places an order
+    # live    trades whatever policy is deployed, gate or not (use with care)
+    # off     not consulted
+    RL_MODE: str = Field(default=os.getenv("RL_MODE", "auto"))
+    # Streamed and backfilled for market context (the policy reads SPY), never traded
+    # unless also on the watchlist.
+    CONTEXT_SYMBOLS: tuple = ("SPY",)
+    RL_GATE_MIN_T: float = 2.0          # test-set t-stat a policy needs to be approved
+    # Learner agent: after each close, retrain on the newest data (warm start)
+    # and deploy the result only if it beats the current policy on the same days.
+    RL_RETRAIN_ENABLED: bool = True
+    RL_RETRAIN_AFTER_CLOSE_MINUTES: float = 30.0
+    RL_RETRAIN_ITERATIONS: int = 120
+
     # --- Curator: moves discovery's best picks onto the watchlist ---
     CURATOR_INTERVAL_SECONDS: float = 30.0
 

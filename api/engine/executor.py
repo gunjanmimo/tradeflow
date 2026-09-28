@@ -21,8 +21,6 @@ ENTRY_CONTEXT_KEYS = frozenset({
     "consensus_score", "conviction_tier", "composite_conviction", "entry_rsi",
     "entry_spread", "entry_atr_pct", "stop_pct", "buy_prob", "entry_reason",
     "entry_strategy", "entry_regime", "extended_hours", "brackets_in_engine",
-    # RL policy bookkeeping (rl/live.py): the observation and action at entry.
-    "rl_entry",
 })
 
 class AlpacaExecutor:
@@ -464,8 +462,6 @@ class AlpacaExecutor:
                 "entry_strategy": entry_strategy,
                 "entry_regime": gate.get("regime"),
             }
-            if gate.get("rl_entry"):
-                entry_context["rl_entry"] = gate["rl_entry"]
 
             t0 = time.time()
             is_alpaca_tradable = symbol in self.alpaca_tradable_symbols

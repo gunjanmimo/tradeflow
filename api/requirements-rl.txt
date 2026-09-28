@@ -1,0 +1,5 @@
+# Training the RL policy (python -m rl.train) and the Learner's nightly retrain.
+# The live engine does NOT need this: it runs the policy in numpy.
+# For a CUDA build pick the matching wheel from https://pytorch.org/get-started/locally/
+-r requirements.txt
+torch>=2.3

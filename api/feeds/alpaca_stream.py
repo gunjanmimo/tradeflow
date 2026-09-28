@@ -195,6 +195,7 @@ class MarketStreamRunner:
             "TSLA": 252.10,
             "MSFT": 428.80,
             "PLTR": 42.10,
+            "SPY": 560.00,
         }
         # One simulated "minute" bar per symbol every few seconds, so the demo
         # moves at a watchable pace. Bars carry consecutive synthetic minutes,
@@ -219,7 +220,7 @@ class MarketStreamRunner:
 
         while self._running:
             try:
-                for sym in list(state.watchlist):
+                for sym in sorted(set(state.watchlist) | set(settings.CONTEXT_SYMBOLS)):
                     o, h, l, c, v = bar_for(sym)
                     half = round(c * 0.0002, 2)
                     self.on_quote(sym, c - half, c + half)
@@ -236,7 +237,7 @@ class MarketStreamRunner:
         """Stock WebSocket Data Stream (runs during market hours, maintains baseline off-hours)"""
         from alpaca.data.live import StockDataStream
 
-        stocks = list(state.watchlist)
+        stocks = sorted(set(state.watchlist) | set(settings.CONTEXT_SYMBOLS))
         if not stocks and not state.active_positions:
             return
 
