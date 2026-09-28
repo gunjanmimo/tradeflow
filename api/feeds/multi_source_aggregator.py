@@ -36,6 +36,13 @@ import aiohttp
 
 from core.config import settings
 from core.state import state
+from core.universe import universe
+
+# eToro lists crypto bare; these are read as the USD pair even when not watched.
+_CRYPTO_BASES = frozenset({
+    "BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "AVAX", "LINK", "LTC", "BCH",
+    "DOT", "SHIB", "UNI", "XLM", "TRX", "BNB",
+})
 
 logger = logging.getLogger("tradeflow.aggregator")
 
@@ -136,8 +143,11 @@ class MultiSourceTrendAggregator:
                 links = []
                 for entry in root.findall("a:entry", ns):
                     link_el = entry.find("a:link", ns)
-                    if link_el is not None and link_el.get("href"):
-                        links.append(link_el.get("href"))
+                    href = link_el.get("href") if link_el is not None else None
+                    # Each filing appears once per issuer and once per reporting
+                    # owner, under different CIK paths; the accession number is shared.
+                    if href and href.rsplit("/", 1)[-1] not in {l.rsplit("/", 1)[-1] for l in links}:
+                        links.append(href)
 
                 # Bounded fan-out: SEC asks for <=10 req/s; stay well under.
                 sem = asyncio.Semaphore(4)
@@ -177,10 +187,15 @@ class MultiSourceTrendAggregator:
                 return None
             page = await resp.text()
 
-        m = re.search(r'href="(/Archives/[^"]+\.xml)"', page)
-        if not m:
+        # The index lists the filing twice: an XSL-rendered HTML view under
+        # ".../xslF345X0N/..." and the raw XML. Only the raw one parses; taking
+        # the first match (the rendered view) made this pillar silently return
+        # nothing for every filing.
+        raw = [h for h in re.findall(r'href="(/Archives/[^"]+\.xml)"', page)
+               if "/xsl" not in h.lower()]
+        if not raw:
             return None
-        xml_url = "https://www.sec.gov" + m.group(1)
+        xml_url = "https://www.sec.gov" + raw[0]
 
         async with session.get(xml_url) as resp:
             if resp.status != 200:
@@ -193,9 +208,9 @@ class MultiSourceTrendAggregator:
             return None
         symbol = sym_el.text.strip().upper()
 
-        # Only score symbols we actually follow
-        if symbol not in state.watchlist:
-            return None
+        # Every issuer is kept, not only watchlist symbols: an insider buying a
+        # company we do not follow yet is exactly what discovery is for. Only
+        # watchlist symbols ever size a trade; the rest feed the candidate pool.
 
         # Transaction codes: P = open-market purchase, S = sale, A = award/grant.
         # Awards are compensation, not conviction, so they are deliberately ignored.
@@ -387,19 +402,22 @@ class MultiSourceTrendAggregator:
     @staticmethod
     def _map_etoro_symbol(etoro_sym: str) -> Optional[str]:
         """
-        Maps an eToro instrument symbol onto our watchlist spelling.
+        Maps an eToro instrument symbol onto the spelling we trade.
 
-        eToro lists crypto bare ("BTC"), we track pairs ("BTC/USD"). Only symbols
-        actually on the watchlist are returned; everything else is ignored rather
-        than guessed at.
+        Crypto is listed bare ("BTC"); we track pairs ("BTC/USD"). A foreign
+        listing ("AZN.L") maps to its US ADR when one exists. Anything else is
+        kept as-is: it is not tradable here, but it is still a discovery signal
+        (a country ETF is offered as the proxy).
         """
         s = etoro_sym.upper().strip()
-        if s in state.watchlist:
-            return s
+        if not s:
+            return None
         pair = f"{s}/USD"
-        if pair in state.watchlist:
+        if pair in state.watchlist or s in _CRYPTO_BASES:
             return pair
-        return None
+        if "." in s and s != "BRK.B":
+            return universe.tradable_symbol(s) or s
+        return s
 
     # -----------------------------------------------------------------
     # Pillar 3: StockTwits -- real sentiment ratio
@@ -413,6 +431,12 @@ class MultiSourceTrendAggregator:
         signals: List[SourceSignal] = []
         headers = {"User-Agent": "Mozilla/5.0 (compatible; TradeFlow/1.0)"}
         symbols = sorted(state.watchlist)[:settings.STOCKTWITS_MAX_SYMBOLS]
+        # Public sentiment on the strongest discovery candidates too, so a
+        # candidate is judged on crowd mood before anyone promotes it.
+        from engine.discovery import discovery
+        for sym in discovery.sentiment_symbols()[:settings.STOCKTWITS_MAX_CANDIDATES]:
+            if sym not in symbols and "/" not in sym:
+                symbols.append(sym)
         blocked = 0
 
         timeout = aiohttp.ClientTimeout(total=6)

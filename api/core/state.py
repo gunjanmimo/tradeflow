@@ -6,6 +6,7 @@ import asyncio
 from core.risk_profile import (
     RiskProfile, get_profile, clamp_factor, DEFAULT_RISK_FACTOR,
 )
+from core.minute_bars import minute_bars
 
 @dataclass
 class ScoredHeadline:
@@ -67,11 +68,22 @@ class TradeDecision:
     symbol: str
     action: str  # "BUY", "SELL", "CLOSE", "HOLD"
     buy_prob: float = 0.0
+    hold_prob: float = 0.0
     sell_prob: float = 0.0
     close_prob: float = 0.0
     close: bool = False
     reason: str = ""
     timestamp: float = field(default_factory=time.time)
+    # A protective exit (stale price, end of day) that must not wait out the
+    # normal retry backoff: see settings.FORCED_EXIT_MAX_WAIT_SECONDS.
+    forced: bool = False
+    # SELL: share of the position to sell (0.5 = trim half). CLOSE is always all.
+    fraction: float = 1.0
+    # SELL from the profit harvest: the gain is booked as ring-fenced day income.
+    harvest: bool = False
+    # BUY from loss recovery: a one-time add of rescue_qty to a losing position.
+    rescue: bool = False
+    rescue_qty: float = 0.0
 
 def price_decimals(price: float) -> int:
     """
@@ -148,7 +160,11 @@ class InMemoryState:
         
         # Real-time price ticks: symbol -> PriceTick
         self.latest_prices: Dict[str, PriceTick] = {}
-        
+        # symbol -> when its price last CHANGED. A tick that repeats the last price
+        # (a re-marked quiet position, a heartbeat) does not count, so the age of
+        # this stamp tells a quiet market apart from a dead feed.
+        self.price_moved_at: Dict[str, float] = {}
+
         # Ring buffers of price history (up to 250 bars/ticks) for instant math
         self.price_history: Dict[str, deque] = {}
         self.volume_history: Dict[str, deque] = {}
@@ -189,8 +205,19 @@ class InMemoryState:
             "equity": 100000.0,
             "cash": 100000.0,
             "buying_power": 200000.0,
-            "day_pnl": 0.0
+            "day_pnl": 0.0,
+            "locked_equity": 90000.0,
+            "main_broker_equity": 90000.0,
+            "locked_cash": 90000.0,
+            "is_broker_equity_locked": True,
         }
+
+        # Main broker equity locking: ensures bot never touches broker capital outside budget
+        self.broker_equity_baseline: float = 100000.0
+        self.broker_cash_baseline: float = 100000.0
+        self.locked_broker_equity: float = 90000.0
+        self.locked_broker_cash: float = 90000.0
+        self.is_broker_equity_locked: bool = True
 
         # Max trading capital budget allowed for bot execution (default $10,000.00 USD)
         self.allocated_capital: float = 10000.0
@@ -200,7 +227,7 @@ class InMemoryState:
         # over the class default. Changed live from the API; read on every tick.
         self.strategy_class_defaults: Dict[str, str] = {
             "crypto": "momentum_breakout",
-            "equity": "news_catalyst",
+            "equity": "stock_score",
         }
         self.strategy_overrides: Dict[str, str] = {}
         # Last entry-gate evaluation per symbol, so the UI can explain a no-trade.
@@ -214,6 +241,12 @@ class InMemoryState:
         # --- Portfolio-level risk tracking (drives the circuit breakers) ---
         # Realised PnL booked today, reset at the start of each trading day.
         self.realized_pnl_today: float = 0.0
+        # Part of realized_pnl_today taken as ring-fenced day income by the
+        # profit harvest. Excluded from the daily-loss breaker.
+        self.harvested_today: float = 0.0
+        # Stocks Alpaca trades in fractions (from the asset catalog at start-up):
+        # a profit harvest sells half of a one-share winner as 0.5 share.
+        self.fractionable_symbols: set = set()
         self.trading_day: str = time.strftime("%Y-%m-%d")
         # High-water mark of equity, for drawdown measurement.
         self.peak_equity: float = 0.0
@@ -259,10 +292,133 @@ class InMemoryState:
             total += qty * price
         return round(total, 2)
 
+    # ---- Hard budget cap ----
+    #
+    # The budget is a hard cap on the money the bots may put at risk, not a soft
+    # target measured against market value. Three things used to let the bots
+    # spend outside it: headroom was cap minus MARKET value (a falling position
+    # reopened room to buy more, so cost basis crept past the cap); realised
+    # losses never shrank the cap (after losing $500 of $10k the bots still
+    # deployed $10k); and orders in flight were not counted at all.
+
+    @property
+    def bot_capital(self) -> float:
+        """The bots' own money: the cap plus realised PnL booked against it."""
+        from core.capital_plan import capital_plan
+        return round(self.allocated_capital + capital_plan.budget_realized, 2)
+
+    @property
+    def hard_cap(self) -> float:
+        """Most the bots may have committed at once: the cap, reduced by realised losses."""
+        return max(0.0, round(min(self.allocated_capital, self.bot_capital), 2))
+
+    @property
+    def committed_capital(self) -> float:
+        """Cost basis of open positions plus notional of buys still in flight."""
+        total = 0.0
+        for pos in self.active_positions.values():
+            qty = float(pos.get("qty", 0.0))
+            avg = float(pos.get("avg_entry_price") or pos.get("current_price") or 0.0)
+            if qty > 0:
+                total += qty * avg
+        from engine.executor import executor
+        total += executor.inflight_committed()
+        return round(total, 2)
+
     @property
     def remaining_budget(self) -> float:
-        """Remaining dollar budget available for new trades under the allocated cap"""
-        return max(0.0, round(self.allocated_capital - self.total_position_exposure, 2))
+        """Dollars the bots may still commit to new trades under the hard cap."""
+        return max(0.0, round(self.hard_cap - self.committed_capital, 2))
+
+    @property
+    def bot_cash(self) -> float:
+        """Cash available strictly within the bot's budget under the hard cap. Never touches locked broker cash."""
+        broker_cash = float(self.account_info.get("cash", 0.0))
+        return max(0.0, round(min(broker_cash, self.remaining_budget), 2))
+
+    @property
+    def budget_base(self) -> float:
+        """Capital that percentage-based sizing is measured against.
+        Strictly capped by the bot's hard cap; never touches broker equity outside."""
+        return max(0.0, min(self.hard_cap, self.bot_capital))
+
+    @property
+    def open_unrealized_pnl(self) -> float:
+        return round(sum(float(p.get("unrealized_pl") or 0.0)
+                         for p in self.active_positions.values()), 2)
+
+    @property
+    def bot_equity(self) -> float:
+        """What the bot account/slice is worth now."""
+        from core.capital_plan import capital_plan
+        if capital_plan.plan.mode == "stair":
+            return round(capital_plan.plan.trading_capital + capital_plan.plan.reserve + capital_plan.plan.banked_income
+                         + capital_plan.plan.harvested_income + self.open_unrealized_pnl, 2)
+        # Harvested income is counted so moving a gain from unrealised to income
+        # is not read as a drawdown; it is still never part of bot_capital.
+        return round(self.bot_capital + capital_plan.plan.harvested_income + self.open_unrealized_pnl, 2)
+
+    def sync_locked_equity(self, assigned: Optional[float] = None):
+        """
+        Locks the main broker equity so the bot CANNOT touch or affect funds outside the budget cap.
+        In classic mode: locked = max(0, total_broker_equity - allocated_capital).
+        In stair mode: locked = max(0, total_broker_equity - deposit).
+        """
+        from core.capital_plan import capital_plan
+        if assigned is None:
+            assigned = capital_plan.plan.deposit if capital_plan.plan.mode == "stair" else self.allocated_capital
+
+        current_equity = float(self.account_info.get("equity", 100000.0))
+        if self.broker_equity_baseline <= 0 or current_equity > self.broker_equity_baseline:
+            self.broker_equity_baseline = current_equity
+
+        self.locked_broker_equity = max(0.0, round(self.broker_equity_baseline - float(assigned), 2))
+
+        current_cash = float(self.account_info.get("cash", 100000.0))
+        if self.broker_cash_baseline <= 0 or current_cash > self.broker_cash_baseline:
+            self.broker_cash_baseline = current_cash
+        self.locked_broker_cash = max(0.0, round(self.broker_cash_baseline - float(assigned), 2))
+
+        self.is_broker_equity_locked = True
+        self.account_info["locked_equity"] = self.locked_broker_equity
+        self.account_info["main_broker_equity"] = self.locked_broker_equity
+        self.account_info["locked_cash"] = self.locked_broker_cash
+        self.account_info["is_broker_equity_locked"] = True
+        self.account_info["bot_equity"] = self.bot_equity
+        self.account_info["bot_capital"] = self.bot_capital
+        self.account_info["hard_cap"] = self.hard_cap
+        self.account_info["bot_cash"] = self.bot_cash
+
+    @property
+    def daily_pnl(self) -> Dict[str, Any]:
+        from core.pnl_ledger import pnl_ledger
+        return pnl_ledger.snapshot(
+            self.open_unrealized_pnl,
+            self.hard_cap,
+            active_positions=self.active_positions,
+            total_equity=float(self.account_info.get("equity", 100000.0)),
+            locked_equity=self.locked_broker_equity,
+        )
+
+    def budget_snapshot(self) -> Dict[str, Any]:
+        committed = self.committed_capital
+        cap = self.hard_cap
+        return {
+            "allocated_capital": self.allocated_capital,
+            "hard_cap": cap,
+            "bot_capital": self.bot_capital,
+            "bot_equity": self.bot_equity,
+            "bot_cash": self.bot_cash,
+            "committed_capital": committed,
+            "total_position_exposure": self.total_position_exposure,
+            "remaining_budget": max(0.0, round(cap - committed, 2)),
+            "utilization_pct": round(committed / cap * 100, 1) if cap > 0 else 100.0,
+            "locked_broker_equity": self.locked_broker_equity,
+            "main_broker_equity": self.locked_broker_equity,
+            "locked_broker_cash": self.locked_broker_cash,
+            "is_broker_equity_locked": self.is_broker_equity_locked,
+            "broker_equity_baseline": self.broker_equity_baseline,
+        }
 
     def get_or_create_history(self, symbol: str, maxlen: int = 250) -> deque:
         if symbol not in self.price_history:
@@ -271,17 +427,29 @@ class InMemoryState:
             self.time_history[symbol] = deque(maxlen=maxlen)
         return self.price_history[symbol]
 
-    def update_price(self, symbol: str, price: float, bid: float = 0.0, ask: float = 0.0, volume: float = 0.0):
+    def update_price(self, symbol: str, price: float, bid: float = 0.0, ask: float = 0.0,
+                     volume: float = 0.0, record_history: bool = True):
+        """
+        record_history=False moves the live price without adding an indicator
+        sample: used for per-trade prints on held positions, whose indicators
+        stay on the bar cadence their lookbacks were tuned for.
+        """
         tick = PriceTick(symbol=symbol, price=price, bid=bid or price, ask=ask or price, volume=volume)
+        prev = self.latest_prices.get(symbol)
+        if prev is None or prev.price != price or symbol not in self.price_moved_at:
+            self.price_moved_at[symbol] = tick.timestamp
         self.latest_prices[symbol] = tick
-        buf = self.get_or_create_history(symbol)
-        buf.append(price)
-        # Monotonic per-symbol sample counter: lets incremental indicators tell
-        # "exactly one new sample" apart from gaps they must recompute over.
-        self.tick_count[symbol] = self.tick_count.get(symbol, 0) + 1
-        self.time_history[symbol].append(tick.timestamp)
-        if volume > 0:
-            self.volume_history[symbol].append(volume)
+        # Every price, trade prints included, feeds the 1-minute bars trend reads.
+        minute_bars.on_tick(symbol, price, volume, tick.timestamp)
+        if record_history:
+            buf = self.get_or_create_history(symbol)
+            buf.append(price)
+            # Monotonic per-symbol sample counter: lets incremental indicators tell
+            # "exactly one new sample" apart from gaps they must recompute over.
+            self.tick_count[symbol] = self.tick_count.get(symbol, 0) + 1
+            self.time_history[symbol].append(tick.timestamp)
+            if volume > 0:
+                self.volume_history[symbol].append(volume)
 
         # Real-time Open PnL calculation on EVERY price tick (< 0.01 ms)
         if symbol in self.active_positions:
@@ -450,8 +618,11 @@ class InMemoryState:
                 f"Trading day rolled {self.trading_day} -> {today}. "
                 f"Realised PnL for {self.trading_day}: ${self.realized_pnl_today:+,.2f}. Counters reset."
             )
+            from core.pnl_ledger import pnl_ledger
+            pnl_ledger.roll(today)
             self.trading_day = today
-            self.realized_pnl_today = 0.0
+            self.realized_pnl_today = pnl_ledger.realized_today()
+            self.harvested_today = pnl_ledger.harvested_today()
             # A daily-loss halt expires with the day; a drawdown halt does not.
             if self.halt_reason and "Daily loss" in self.halt_reason:
                 self.halt_reason = None
@@ -460,29 +631,55 @@ class InMemoryState:
         """Records realised PnL from a closed position against today's risk budget."""
         self.roll_trading_day_if_needed()
         self.realized_pnl_today = round(self.realized_pnl_today + float(pnl), 2)
-        # Stair mode ratchets its stage and budget off realised PnL only.
+        # Both capital modes shrink the hard cap on realised losses; stair also
+        # ratchets its stage off realised PnL.
         from core.capital_plan import capital_plan
         capital_plan.on_realized(symbol, pnl)
+        from core.pnl_ledger import pnl_ledger
+        pnl_ledger.on_close(symbol, pnl)
+
+    def book_harvested_income(self, symbol: str, pnl: float):
+        """
+        Books a profit-harvest gain as day income. It counts in today's P&L but
+        never in the trading budget: not in classic's realised ledger, not in a
+        stair stage's capital, and not as a cushion against the daily loss limit.
+        """
+        self.roll_trading_day_if_needed()
+        value = round(float(pnl), 2)
+        self.realized_pnl_today = round(self.realized_pnl_today + value, 2)
+        self.harvested_today = round(self.harvested_today + value, 2)
+        from core.capital_plan import capital_plan
+        capital_plan.on_harvest(symbol, value)
+        from core.pnl_ledger import pnl_ledger
+        pnl_ledger.on_harvest(symbol, value)
 
     def update_peak_equity(self):
-        eq = float(self.account_info.get("equity", 0.0))
+        # Measured on the bots' own equity. Against the whole broker account a
+        # $10k budget in a $100k account diluted every drawdown tenfold, so the
+        # breaker effectively never fired.
+        eq = self.bot_equity
         if eq > self.peak_equity:
             self.peak_equity = eq
 
+    def reset_peak_equity(self):
+        """Called when the budget changes: the old high-water mark no longer applies."""
+        self.peak_equity = self.bot_equity
+
     @property
     def drawdown_pct(self) -> float:
-        """Percent below peak equity. 0.0 when at or above the high-water mark."""
+        """Percent of bot equity below its peak. 0.0 when at or above the high-water mark."""
         if self.peak_equity <= 0:
             return 0.0
-        eq = float(self.account_info.get("equity", 0.0))
-        return max(0.0, round((self.peak_equity - eq) / self.peak_equity * 100.0, 3))
+        return max(0.0, round((self.peak_equity - self.bot_equity) / self.peak_equity * 100.0, 3))
 
     @property
     def daily_loss_pct(self) -> float:
         """Today's realised loss as a percent of the allocated budget (positive = loss)."""
         if self.allocated_capital <= 0:
             return 0.0
-        return max(0.0, round(-self.realized_pnl_today / self.allocated_capital * 100.0, 3))
+        # Harvested income is excluded: it is set aside, not a buffer for losses.
+        trading_pnl = self.realized_pnl_today - self.harvested_today
+        return max(0.0, round(-trading_pnl / self.allocated_capital * 100.0, 3))
 
     def log_event(self, level: str, message: str, meta: Optional[Dict[str, Any]] = None):
         self.logs.append({

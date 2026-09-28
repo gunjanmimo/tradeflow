@@ -256,22 +256,27 @@ class AgentMemory:
             }
 
             # Bot -> Trade
-            await hydra.link(
+            ok = await hydra.link(
                 "Bot", f"bot:{bot_id}", "EXECUTED", "Trade", f"trade:{trade_id}",
                 from_props={"bot_id": bot_id, "symbol": symbol, "strategy": strategy},
                 to_props=trade_props,
             )
             # Trade -> Symbol
-            await hydra.link(
+            ok &= await hydra.link(
                 "Trade", f"trade:{trade_id}", "ON", "Symbol", f"symbol:{symbol}",
                 to_props={"ticker": symbol,
                           "asset_class": "crypto" if is_crypto_symbol(symbol) else "equity"},
             )
             # Trade -> Setup  (the join point that makes condition-based recall work)
-            await hydra.link(
+            ok &= await hydra.link(
                 "Trade", f"trade:{trade_id}", "FROM_SETUP", "Setup", f"setup:{sk['key']}",
                 to_props={k: v for k, v in sk.items()},
             )
+            if not ok:
+                self.write_failures += 1
+                logger.warning(f"Memory: HydraDB rejected the write for {symbol} "
+                               f"({hydra.last_error}); outcome not recorded")
+                return False
 
             self.trades_written += 1
             self._stats_cache.pop(sk["key"], None)

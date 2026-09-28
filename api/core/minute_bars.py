@@ -1,0 +1,172 @@
+"""
+One-minute OHLCV bars per symbol: the time series the trend analyst reads.
+
+The tick buffer in core/state.py holds 250 samples, which is ~2 minutes of a
+crypto pair polled twice a second -- far too short to call a trend. Bars are
+time-bucketed instead, so every symbol gets the same clock whatever its tick rate.
+
+  backfill   at start-up and for every symbol newly watched or held, the last
+             sessions of 1-minute bars come from Alpaca's historical API, so the
+             agents understand the trend before they act rather than waiting
+             20+ minutes for live bars to accumulate
+  live       every price update (core/state.py update_price) folds into the
+             current minute's bar
+
+Bars are bucketed by the minute a price ARRIVES. A streamed stock minute bar
+arrives just after its minute ends, so it lands one bucket late; at a 20-60 bar
+horizon that shift does not change the read.
+
+Nothing here makes a network call on the tick path: backfill runs in a thread
+from the trend analyst's loop.
+"""
+import asyncio
+import logging
+import time
+from collections import deque
+from typing import Dict, Iterable, List, Optional
+
+import numpy as np
+
+logger = logging.getLogger("tradeflow.minute_bars")
+
+MAX_BARS = 390                      # one regular US session
+BACKFILL_RETRY_SECONDS = 900.0
+
+
+class MinuteBars:
+    def __init__(self):
+        # symbol -> deque of [minute, open, high, low, close, volume]
+        self._bars: Dict[str, deque] = {}
+        self.backfilled_at: Dict[str, float] = {}
+        self.last_error: Optional[str] = None
+        self._inflight = False
+
+    # ------------------------------------------------------------------
+    # Live
+    # ------------------------------------------------------------------
+
+    def on_tick(self, symbol: str, price: float, volume: float = 0.0,
+                ts: Optional[float] = None):
+        if not price or price <= 0:
+            return
+        minute = int((time.time() if ts is None else ts) // 60)
+        dq = self._bars.get(symbol)
+        if dq is None:
+            dq = self._bars[symbol] = deque(maxlen=MAX_BARS)
+        if dq and dq[-1][0] == minute:
+            bar = dq[-1]
+            bar[2] = max(bar[2], price)
+            bar[3] = min(bar[3], price)
+            bar[4] = price
+            bar[5] += volume or 0.0
+        elif dq and dq[-1][0] > minute:
+            return                          # out of order: ignore
+        else:
+            dq.append([minute, price, price, price, price, volume or 0.0])
+
+    def merge_history(self, symbol: str, bars: Iterable[tuple]):
+        """Prepends historical bars older than anything already held live."""
+        dq = self._bars.get(symbol) or deque(maxlen=MAX_BARS)
+        first = dq[0][0] if dq else None
+        older = sorted((list(b) for b in bars if first is None or b[0] < first),
+                       key=lambda b: b[0])
+        self._bars[symbol] = deque(older + list(dq), maxlen=MAX_BARS)
+
+    # ------------------------------------------------------------------
+    # Reads
+    # ------------------------------------------------------------------
+
+    def closes(self, symbol: str, n: Optional[int] = None) -> np.ndarray:
+        dq = self._bars.get(symbol)
+        if not dq:
+            return np.empty(0)
+        rows = list(dq)[-n:] if n else list(dq)
+        return np.fromiter((b[4] for b in rows), dtype=np.float64, count=len(rows))
+
+    def count(self, symbol: str) -> int:
+        return len(self._bars.get(symbol) or ())
+
+    def drop(self, symbol: str):
+        self._bars.pop(symbol, None)
+        self.backfilled_at.pop(symbol, None)
+
+    def status(self) -> Dict:
+        return {"symbols": len(self._bars),
+                "backfilled": len(self.backfilled_at),
+                "last_error": self.last_error}
+
+    # ------------------------------------------------------------------
+    # Backfill
+    # ------------------------------------------------------------------
+
+    async def ensure(self, symbols: Iterable[str]) -> int:
+        """Backfills symbols not backfilled recently. One run at a time; never raises."""
+        from core.config import settings
+        key = settings.ALPACA_API_KEY
+        if not settings.MINUTE_BARS_BACKFILL or not key or key.startswith("PK_PLACEHOLDER"):
+            return 0
+        if self._inflight:
+            return 0
+        now = time.time()
+        todo = sorted({s for s in symbols
+                       if now - self.backfilled_at.get(s, 0.0) > BACKFILL_RETRY_SECONDS})
+        if not todo:
+            return 0
+        self._inflight = True
+        try:
+            loop = asyncio.get_running_loop()
+            got = 0
+            stocks = [s for s in todo if "/" not in s]
+            cryptos = [s for s in todo if "/" in s]
+            for batch, crypto in ([(stocks[i:i + 25], False) for i in range(0, len(stocks), 25)]
+                                  + [(cryptos[i:i + 25], True) for i in range(0, len(cryptos), 25)]):
+                result = await loop.run_in_executor(None, self._fetch_sync, batch, crypto)
+                for sym, bars in result.items():
+                    self.merge_history(sym, bars)
+                    got += 1
+            for s in todo:
+                self.backfilled_at[s] = now
+            if got:
+                logger.info(f"Backfilled 1-minute bars for {got} symbols")
+            return got
+        except Exception as e:
+            self.last_error = f"{type(e).__name__}: {str(e)[:160]}"
+            logger.warning(f"Minute-bar backfill failed: {self.last_error}")
+            return 0
+        finally:
+            self._inflight = False
+
+    def _fetch_sync(self, symbols: List[str], crypto: bool) -> Dict[str, list]:
+        from datetime import datetime, timedelta, timezone
+        from core.config import settings
+        from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
+        from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+
+        end = datetime.now(timezone.utc)
+        if crypto:
+            client = CryptoHistoricalDataClient(settings.ALPACA_API_KEY, settings.ALPACA_SECRET_KEY)
+            resp = client.get_crypto_bars(CryptoBarsRequest(
+                symbol_or_symbols=symbols, timeframe=TimeFrame.Minute,
+                start=end - timedelta(hours=7), end=end))
+        else:
+            from alpaca.data.enums import DataFeed
+            client = StockHistoricalDataClient(settings.ALPACA_API_KEY, settings.ALPACA_SECRET_KEY)
+            # IEX: the free plan may not query the last 15 minutes of SIP data,
+            # which is exactly the part an intraday trend needs. Four calendar
+            # days reach back across a weekend to the previous session.
+            resp = client.get_stock_bars(StockBarsRequest(
+                symbol_or_symbols=symbols, timeframe=TimeFrame.Minute,
+                start=end - timedelta(days=4), end=end, feed=DataFeed.IEX))
+        out: Dict[str, list] = {}
+        for sym, bars in (getattr(resp, "data", None) or {}).items():
+            rows = [(int(b.timestamp.timestamp() // 60), float(b.open), float(b.high),
+                     float(b.low), float(b.close), float(b.volume or 0.0))
+                    for b in bars if b.close and b.close > 0]
+            if rows:
+                out[sym] = rows[-MAX_BARS:]
+        self.last_error = None
+        return out
+
+
+minute_bars = MinuteBars()

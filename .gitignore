@@ -29,3 +29,6 @@ app/dist/
 
 # Runtime state (capital plan ledger)
 api/data/
+
+# Backtest bar cache and reports (python -m backtest)
+api/backtest/output/

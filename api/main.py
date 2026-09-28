@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from core.config import settings
 from core.version import __version__
 from core.state import state
-from sentiment.laya_service import laya_service
+from sentiment.router import sentiment_service
 from engine.executor import executor
 from feeds.alpaca_stream import market_stream
 from feeds.expert_watcher import expert_watcher, BENCHMARK_EXPERTS
@@ -26,6 +26,13 @@ from memory.agent_memory import agent_memory
 from core.latency import latency, monitor_event_loop
 from engine.analysis.service import analysis_service
 from core.capital_plan import capital_plan
+from core.market_filter import market_filter
+from engine.discovery import discovery, WEIGHTS as DISCOVERY_WEIGHTS
+from engine.diversification import diversification
+from engine.portfolio_manager import portfolio_manager
+from engine.fleet import fleet
+from engine.trend import board as trend_board
+from feeds.daily_bars import daily_bars
 
 # Configure logging
 logging.basicConfig(
@@ -66,7 +73,7 @@ async def broadcast_telemetry():
                         for r in [state.get_sentiment(sym)]
                     },
                     "recent_decisions": [
-                        {"symbol": d.symbol, "action": d.action, "buy_prob": d.buy_prob, "sell_prob": d.sell_prob, "close": d.close, "reason": d.reason, "time": d.timestamp}
+                        {"symbol": d.symbol, "action": d.action, "buy_prob": d.buy_prob, "hold_prob": getattr(d, "hold_prob", 0.0), "sell_prob": d.sell_prob, "close": d.close, "reason": d.reason, "time": d.timestamp}
                         for d in list(state.recent_decisions)[-10:]
                     ],
                     "aggregated_trends": {
@@ -101,12 +108,9 @@ async def broadcast_telemetry():
                     "gate_detail": dict(state.last_gate_detail),
                     "news_status": news_feed.status(),
                     "market_clock": market_scheduler.get_market_status(),
-                    "budget": {
-                        "allocated_capital": state.allocated_capital,
-                        "total_position_exposure": state.total_position_exposure,
-                        "remaining_budget": state.remaining_budget,
-                        "utilization_pct": round((state.total_position_exposure / state.allocated_capital) * 100, 1) if state.allocated_capital > 0 else 0.0
-                    },
+                    "budget": state.budget_snapshot(),
+                    "markets": market_filter.snapshot(list(state.watchlist)),
+                    "daily_pnl": state.daily_pnl,
                     "risk": _portfolio_risk_snapshot(),
                     "sentinel_bots": sentinel_registry.to_dict(),
                     "recent_trades": list(state.recent_trades)[-50:],
@@ -115,6 +119,9 @@ async def broadcast_telemetry():
                     "portfolio_analytics": state.portfolio_analytics,
                     "analysis_status": analysis_service.status(),
                     "capital_plan": capital_plan.plan.to_dict(),
+                    "diversification": _diversification_brief(),
+                    "manager": portfolio_manager.snapshot(),
+                    "fleet": fleet.snapshot(),
                     "latency": latency_snapshot,
                     "server_time": time.time(),
                 }
@@ -171,6 +178,22 @@ def _analysis_summary() -> Dict[str, Any]:
     return out
 
 
+def _diversification_brief() -> Dict[str, Any]:
+    """Headline numbers from the last discovery cycle's risk report (refreshed ~1/min)."""
+    r = discovery.risk_report or {}
+    risk = r.get("risk") or {}
+    sl = r.get("sleeves") or {}
+    return {
+        "warnings": r.get("warnings", []),
+        "invested_pct": sl.get("invested_pct"),
+        "defensive_pct": sl.get("defensive_pct"),
+        "var95_pct_of_budget": risk.get("var95_pct_of_budget"),
+        "diversification_ratio": risk.get("diversification_ratio"),
+        "effective_bets": risk.get("effective_bets"),
+        "candidates": len(discovery.candidates),
+    }
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Initializing Tradeflow Continuous Trading Engine...")
@@ -185,9 +208,13 @@ async def lifespan(app: FastAPI):
     # 0b. Capital plan (classic / stair). Loaded before trading can start so the
     # budget is right from the first tick and banked income survives restarts.
     capital_plan.load()
+    from core.pnl_ledger import pnl_ledger
+    pnl_ledger.roll(state.trading_day)
+    state.realized_pnl_today = pnl_ledger.realized_today()
+    state.harvested_today = pnl_ledger.harvested_today()
 
-    # 1. Initialize Laya in-process sentiment model
-    await laya_service.initialize()
+    # 1. Initialize sentiment: Jev (TypeSafe) first, Laya loaded as fallback
+    await sentiment_service.initialize()
 
     # 2. Connect to Alpaca Trading API / Paper Sandbox
     await executor.initialize()
@@ -216,7 +243,14 @@ async def lifespan(app: FastAPI):
     # 10. Off-process analytics (council, regime, Monte Carlo, pairs, risk) and
     # the event-loop lag monitor that proves they are not slowing the tick path.
     await analysis_service.start()
+
+    # 11. Discovery pool + diversification risk analysis (off the order path).
+    await discovery.start()
     loop_monitor_task = asyncio.create_task(monitor_event_loop())
+
+    # 12. Agent fleet: trend analyst (reads the time series first), curator,
+    # trader (the portfolio manager) and position manager.
+    await fleet.start()
 
     logger.info("Tradeflow sub-second trading engine is LIVE!")
     yield
@@ -225,12 +259,15 @@ async def lifespan(app: FastAPI):
     telemetry_task.cancel()
     sync_task.cancel()
     loop_monitor_task.cancel()
+    await fleet.stop()
     await analysis_service.stop()
+    await discovery.stop()
     await trend_aggregator.stop()
     await market_scheduler.stop()
     await market_stream.stop()
     await news_feed.stop()
     await expert_watcher.stop()
+    await sentiment_service.close()
 
 app = FastAPI(
     title="Tradeflow Quant API",
@@ -251,6 +288,14 @@ app.add_middleware(
 class WatchlistAddRequest(BaseModel):
     symbol: str
 
+class MarketToggleRequest(BaseModel):
+    market: str
+    enabled: bool
+
+class SymbolToggleRequest(BaseModel):
+    symbol: str
+    enabled: bool
+
 class BudgetUpdateRequest(BaseModel):
     allocated_capital: float
 
@@ -268,9 +313,21 @@ class StrategyClassRequest(BaseModel):
     asset_class: str      # "crypto" | "equity"
     strategy: str
 
+class SymbolRequest(BaseModel):
+    symbol: str
+
 class StrategyOverrideRequest(BaseModel):
     symbol: str
     strategy: Optional[str] = None   # None clears the override
+
+class PnLCalculatorRequest(BaseModel):
+    target_daily_profit: float = 100.0
+    max_daily_loss: float = 50.0
+    planned_trades: int = 5
+    win_rate_pct: float = 60.0
+    reward_risk_ratio: float = 2.0
+    risk_per_trade: float = 20.0
+    budget: Optional[float] = None
 
 @app.get("/api/status")
 async def get_status():
@@ -281,14 +338,11 @@ async def get_status():
         "is_connected_to_alpaca": executor.is_connected,
         "mode": "ALPACA_PAPER" if not executor.is_mock_mode else "SIMULATED_PAPER",
         "account": state.account_info,
-        "budget": {
-            "allocated_capital": state.allocated_capital,
-            "total_position_exposure": state.total_position_exposure,
-            "remaining_budget": state.remaining_budget,
-            "utilization_pct": round((state.total_position_exposure / state.allocated_capital) * 100, 1) if state.allocated_capital > 0 else 0.0
-        },
+        "budget": state.budget_snapshot(),
+        "daily_pnl": state.daily_pnl,
         "active_positions_count": len(state.active_positions),
-        "watchlist_count": len(state.watchlist)
+        "watchlist_count": len(state.watchlist),
+        "sentiment_backend": sentiment_service.status(),
     }
 
 def _portfolio_risk_snapshot() -> Dict[str, Any]:
@@ -301,7 +355,7 @@ def _portfolio_risk_snapshot() -> Dict[str, Any]:
     than having to wait for a fill to find out.
     """
     profile = state.risk_profile
-    budget = state.allocated_capital or 1.0
+    budget = state.hard_cap or 1.0
 
     # Risk actually at stake across open positions: distance to each stop.
     open_risk = 0.0
@@ -367,6 +421,7 @@ def _portfolio_risk_snapshot() -> Dict[str, Any]:
         "total_risk_to_stops": round(open_risk, 2),
         "total_risk_pct_of_budget": round(open_risk / budget * 100, 3),
         "realized_pnl_today": state.realized_pnl_today,
+        "harvested_income_today": state.harvested_today,
         "daily_loss_pct": state.daily_loss_pct,
         "daily_loss_limit_pct": profile.max_daily_loss_pct,
         "drawdown_pct": state.drawdown_pct,
@@ -388,7 +443,7 @@ async def memory_status():
             strategies[s.name] = (await agent_memory.recall_strategy(s.name)).to_dict()
     return {
         "memory": agent_memory.status(),
-        "hydra": await hydra.health(),
+        "hydra": await hydra.health() if settings.MEMORY_ENABLED else {"available": False, "disabled": True},
         "by_strategy": strategies,
     }
 
@@ -541,6 +596,24 @@ async def get_latency():
     return {**latency.snapshot(max_age_s=0.0), "worker": analysis_service.status()}
 
 
+@app.get("/api/manager")
+async def get_manager():
+    """What the portfolio manager is doing: state, idle budget and why, ranked picks."""
+    return portfolio_manager.snapshot()
+
+
+@app.get("/api/fleet")
+async def get_fleet():
+    """Every agent's status card, and the trend read for each watched or held symbol."""
+    return fleet.snapshot()
+
+
+@app.get("/api/trend/{symbol:path}")
+async def get_trend(symbol: str):
+    """Full multi-horizon trend read for one symbol."""
+    return trend_board.read(symbol.upper().strip()).to_dict()
+
+
 @app.get("/api/gates")
 async def get_gates():
     """
@@ -652,15 +725,55 @@ async def update_budget(req: BudgetUpdateRequest):
         raise HTTPException(status_code=400, detail="Minimum trading budget is $100.00")
     if req.allocated_capital > 1000000.0:
         raise HTTPException(status_code=400, detail="Trading budget cannot exceed account limits")
+    if req.allocated_capital + 1e-6 < state.committed_capital:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Cannot set a ${req.allocated_capital:,.2f} cap while ${state.committed_capital:,.2f} "
+                    "is committed to open or pending bot positions. Close positions first."),
+        )
 
     old_val = state.allocated_capital
-    state.allocated_capital = round(float(req.allocated_capital), 2)
+    capital_plan.set_classic_budget(req.allocated_capital)
     state.log_event("BUDGET", f"Trading capital budget updated: ${old_val:,.2f} → ${state.allocated_capital:,.2f}")
     return {
         "status": "success",
-        "allocated_capital": state.allocated_capital,
-        "total_position_exposure": state.total_position_exposure,
-        "remaining_budget": state.remaining_budget
+        "budget": state.budget_snapshot(),
+    }
+
+
+@app.get("/api/daily-pnl")
+async def get_daily_pnl():
+    """Bot-only daily P&L: closed-trade results, live open-position P&L, scenarios, and history."""
+    from core.pnl_ledger import pnl_ledger
+    return {
+        "summary": state.daily_pnl,
+        "history": pnl_ledger.get_history(31),
+        "scenarios": pnl_ledger.calculate_scenarios(state.active_positions, state.daily_pnl.get("realized_pnl", 0.0)),
+        "budget": state.budget_snapshot(),
+    }
+
+
+@app.post("/api/daily-pnl/calculator")
+async def calculate_daily_pnl_projection(req: PnLCalculatorRequest):
+    """Calculates risk-reward expectancy, daily target progress, and trade projections."""
+    from core.pnl_ledger import pnl_ledger
+    budget = req.budget if (req.budget and req.budget > 0) else state.hard_cap
+    current_net = state.daily_pnl.get("net_pnl", 0.0)
+    projections = pnl_ledger.calculate_projections(
+        target_daily_profit=req.target_daily_profit,
+        max_daily_loss=req.max_daily_loss,
+        planned_trades=req.planned_trades,
+        win_rate_pct=req.win_rate_pct,
+        reward_risk_ratio=req.reward_risk_ratio,
+        risk_per_trade=req.risk_per_trade,
+        budget=budget,
+        current_net_pnl=current_net,
+    )
+    return {
+        "status": "success",
+        "projections": projections,
+        "summary": state.daily_pnl,
+        "scenarios": pnl_ledger.calculate_scenarios(state.active_positions, state.daily_pnl.get("realized_pnl", 0.0)),
     }
 
 @app.get("/api/watchlist")
@@ -688,6 +801,7 @@ async def get_watchlist():
 async def add_to_watchlist(req: WatchlistAddRequest):
     sym = req.symbol.upper().strip()
     state.watchlist.add(sym)
+    await market_stream.ensure_stock_subscription(sym)
     state.log_event("WATCHLIST", f"Added {sym} to active watchlist")
     return {"message": f"{sym} added to watchlist", "watchlist": list(state.watchlist)}
 
@@ -697,7 +811,27 @@ async def remove_from_watchlist(symbol: str):
     if sym in state.watchlist:
         state.watchlist.remove(sym)
         state.log_event("WATCHLIST", f"Removed {sym} from active watchlist")
+        discovery.on_unwatched(sym)
     return {"message": f"{sym} removed from watchlist", "watchlist": list(state.watchlist)}
+
+@app.get("/api/markets")
+async def get_markets():
+    return market_filter.snapshot(list(state.watchlist))
+
+@app.post("/api/markets")
+async def toggle_market(req: MarketToggleRequest):
+    try:
+        market_filter.set_market(req.market, req.enabled)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    state.log_event("MARKETS", f"{req.market.capitalize()} trading switched {'ON' if req.enabled else 'OFF'} (new entries only; open positions still exit normally)")
+    return market_filter.snapshot(list(state.watchlist))
+
+@app.post("/api/markets/symbol")
+async def toggle_symbol(req: SymbolToggleRequest):
+    market_filter.set_symbol(req.symbol, req.enabled)
+    state.log_event("MARKETS", f"{req.symbol.upper()} switched {'ON' if req.enabled else 'OFF'} (new entries only)")
+    return market_filter.snapshot(list(state.watchlist))
 
 @app.get("/api/positions")
 async def get_positions():
@@ -740,6 +874,69 @@ async def trigger_trend_sync():
     """Manually re-aggregates all 4 intelligence feeds on demand"""
     await trend_aggregator.aggregate_all_sources()
     return {"status": "SUCCESS", "count": len(trend_aggregator.aggregated_trends)}
+
+# ---------------------------------------------------------------------------
+# Discovery & diversification
+# ---------------------------------------------------------------------------
+
+@app.get("/api/discovery")
+async def get_discovery(status: Optional[str] = None, sector: Optional[str] = None,
+                        region: Optional[str] = None, limit: int = 100):
+    """Scored candidate pool, sleeve momentum ranking, and service status."""
+    return {
+        "status": discovery.status(),
+        "candidates": discovery.list(status, sector, region, max(1, min(limit, 300))),
+        "sleeve_momentum": discovery.sleeve_momentum,
+        "sentiment_tracked": discovery.sentiment_symbols(),
+        "weights": DISCOVERY_WEIGHTS,
+    }
+
+
+@app.post("/api/discovery/refresh")
+async def refresh_discovery():
+    await discovery.run_cycle()
+    return {"status": "success", **discovery.status()}
+
+
+@app.post("/api/discovery/promote")
+async def promote_candidate(req: SymbolRequest):
+    """Moves a candidate onto the watchlist. Entries still pass every risk gate."""
+    try:
+        result = discovery.promote(req.symbol)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    await market_stream.ensure_stock_subscription(result["symbol"])
+    return {"status": "success", **result}
+
+
+@app.post("/api/discovery/dismiss")
+async def dismiss_candidate(req: SymbolRequest):
+    if not discovery.dismiss(req.symbol):
+        raise HTTPException(status_code=404, detail="No such candidate, or it is on the watchlist")
+    return {"status": "success"}
+
+
+@app.post("/api/discovery/restore")
+async def restore_candidate(req: SymbolRequest):
+    if not discovery.restore(req.symbol):
+        raise HTTPException(status_code=404, detail="No dismissed candidate with that symbol")
+    return {"status": "success"}
+
+
+@app.get("/api/discovery/what-if/{symbol:path}")
+async def candidate_what_if(symbol: str):
+    """Portfolio risk before and after a standard-size position in this symbol."""
+    sym = symbol.upper().strip()
+    await daily_bars.ensure([sym] + list(state.active_positions))
+    return diversification.what_if(sym)
+
+
+@app.get("/api/diversification")
+async def get_diversification():
+    """Sleeve exposure vs the dial's caps, daily-bar portfolio risk, and warnings."""
+    await daily_bars.ensure(list(state.active_positions))
+    return diversification.portfolio_risk()
+
 
 @app.websocket("/ws")
 async def websocket_telemetry_endpoint(websocket: WebSocket):
