@@ -83,6 +83,10 @@ class MinuteBars:
         rows = list(dq)[-n:] if n else list(dq)
         return np.fromiter((b[4] for b in rows), dtype=np.float64, count=len(rows))
 
+    def rows(self, symbol: str) -> List[list]:
+        """Copies of the bars held for a symbol: [minute, open, high, low, close, volume], oldest first."""
+        return [list(b) for b in (self._bars.get(symbol) or ())]
+
     def count(self, symbol: str) -> int:
         return len(self._bars.get(symbol) or ())
 

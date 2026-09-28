@@ -220,11 +220,44 @@ class PortfolioManager:
         self.watch = watch
         return out
 
+    @staticmethod
+    def _ml_score(cands: List[Dict[str, Any]]):
+        """
+        Scores every candidate with the trade scorer in one batch (ml/model.py)
+        and keeps the bar window, so the entry can be recorded as experience.
+        Off the tick path: once per manager cycle, a fraction of a millisecond.
+        """
+        if settings.ML_MODE == "off" or not cands:
+            return
+        from core.latency import latency
+        from ml.features import live_features
+        from ml.model import scorer
+        from engine.strategies import registry
+        t0 = time.perf_counter_ns()
+        items = []
+        for c in cands:
+            sym = c["symbol"]
+            c["ml_bars"] = live_features(sym)
+            c["ml_strategy"] = registry.resolve(sym, state.strategy_class_defaults,
+                                                state.strategy_overrides).name
+        ready = [c for c in cands if c["ml_bars"] is not None]
+        scores = scorer.score([{"bars": c["ml_bars"], "strategy": c["ml_strategy"],
+                                "crypto": is_crypto_symbol(c["symbol"])} for c in ready]) if ready else None
+        for c, sc in zip(ready, scores or []):
+            c["ml"] = sc
+        latency.record_ns("ml_score", t0)
+
     def _rank(self, cands: List[Dict[str, Any]], blocked: Counter) -> List[Dict[str, Any]]:
         sleeves = diversification.sleeves()
         w = min(max(settings.MANAGER_FIT_WEIGHT, 0.0), 1.0)
         ranked = []
+        from ml.model import scorer
+        mode = settings.ML_MODE
         for c in cands:
+            ml = c.get("ml")
+            if mode == "gate" and ml is not None and ml["p_win"] < scorer.threshold:
+                blocked["ml: scored below threshold"] += 1
+                continue
             fit, why = diversification.fit(c["symbol"], sleeves)
             if fit <= 0.0:
                 blocked["diversification: no headroom"] += 1
@@ -236,9 +269,12 @@ class PortfolioManager:
             tr = c["trend"]
             # Strategy conviction, confirmed by how strongly the time series trends.
             conviction = 0.6 * float(c["decision"].buy_prob) + 0.4 * (0.5 + 0.5 * tr.direction)
+            if mode in ("rank", "gate") and ml is not None:
+                wml = min(max(settings.ML_RANK_WEIGHT, 0.0), 1.0)
+                conviction = (1 - wml) * conviction + wml * ml["p_win"]
             meta = universe.classify(c["symbol"])
             ranked.append({
-                **c, "conviction": round(conviction, 3), "fit": round(fit, 3),
+                **c, "conviction": round(conviction, 3), "fit": round(fit, 3), "ml": ml,
                 "score": round((1 - w) * conviction + w * fit, 4),
                 "sector": meta.sector, "region": meta.region, "why": why, "plan": plan,
             })
@@ -294,6 +330,7 @@ class PortfolioManager:
             cands = passed
 
         entered: List[Dict[str, Any]] = []
+        self._ml_score(cands)
         ranked = self._rank(cands, blocked)
 
         if active:
@@ -312,11 +349,16 @@ class PortfolioManager:
                     f"trend {best['trend'].label} {best['trend'].direction:+.2f}; "
                     f"plan ${best['plan']['dollars']:,.2f} ({best['plan']['qty']}x, risk ${best['plan']['risk']:,.2f})"
                     + (f" [{'; '.join(best['why'])}]" if best["why"] else "")
+                    + (f"; model p(win) {best['ml']['p_win']:.2f} ({settings.ML_MODE})" if best.get("ml") else "")
                     + f". ${state.remaining_budget:,.2f} of budget idle.")
                 await executor.execute_decision(best["decision"])
                 if sym in state.active_positions or sym in executor.awaiting_fill:
                     self.entries_total += 1
                     entered.append(best)
+                    if settings.ML_MODE != "off":
+                        from ml.experience import experience
+                        experience.on_entry(sym, best.get("ml_bars"), best.get("ml_strategy") or "",
+                                            is_crypto_symbol(sym), best.get("ml"))
                     self.last_entry = {"symbol": sym, "at": time.time(), "score": best["score"],
                                        "sector": best["sector"], "region": best["region"]}
                 # The book changed (or the entry was refused): re-rank the rest.
@@ -340,6 +382,7 @@ class PortfolioManager:
     def _pick_view(r: Dict[str, Any]) -> Dict[str, Any]:
         return {"symbol": r["symbol"], "score": r["score"], "conviction": r["conviction"],
                 "fit": r["fit"], "sector": r["sector"], "region": r["region"], "why": r["why"],
+                "ml_p_win": (r.get("ml") or {}).get("p_win"),
                 "plan": r["plan"], "trend": r["trend"].brief()}
 
     def _describe(self, active, profile, entered, ranked, blocked, executor) -> Dict[str, Any]:

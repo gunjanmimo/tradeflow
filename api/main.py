@@ -590,6 +590,14 @@ async def quant_portfolio():
     return state.portfolio_analytics or {"status": "warming up"}
 
 
+@app.get("/api/ml")
+async def get_ml():
+    """Trade scorer: mode, whether a model is loaded, its holdout results, and experience recorded."""
+    from ml.model import scorer
+    from ml.experience import experience
+    return {"mode": settings.ML_MODE, "model": scorer.status(), "experience": experience.status()}
+
+
 @app.get("/api/latency")
 async def get_latency():
     """Latency percentiles per stage (hot path, broker, feed, event loop, worker)."""

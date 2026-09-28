@@ -295,6 +295,16 @@ class Settings(BaseSettings):
     RECOVERY_RETRY_SECONDS: float = 30.0
     RECOVERY_BREAKEVEN_BUFFER_PCT: float = 0.10  # lock the stop this far above break-even (fees, spread)
 
+    # --- Trade scorer (ml/): a small LSTM that learns from every closed trade ---
+    # off     not consulted
+    # shadow  scores every entry candidate and records it; decides nothing (default)
+    # rank    also blends the score into the manager's ranking (ML_RANK_WEIGHT)
+    # gate    also skips candidates scored under the model's own threshold
+    # Experience (entry bars + final net result) is recorded in every mode but off.
+    ML_MODE: str = Field(default=os.getenv("ML_MODE", "shadow"))
+    ML_RECORD_EXPERIENCE: bool = True
+    ML_RANK_WEIGHT: float = 0.3
+
     # --- Curator: moves discovery's best picks onto the watchlist ---
     CURATOR_INTERVAL_SECONDS: float = 30.0
 

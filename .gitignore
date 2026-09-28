@@ -32,3 +32,6 @@ api/data/
 
 # Backtest bar cache and reports (python -m backtest)
 api/backtest/output/
+
+# Trained trade scorer (python -m ml.train rebuilds it)
+api/models/*.pt

@@ -390,8 +390,20 @@ def _bar(tape: Tape, i: int, b: Book, strat) -> Optional[Trade]:
     return None
 
 
-def run(tape: Tape, strat, notional: float) -> List[Trade]:
-    """Replays one strategy on one symbol under the current settings."""
+def entry_features(tape: Tape, i: int):
+    """The trade scorer's input for a decision at the close of bar i (ml/features.py)."""
+    from ml.features import bar_features, WINDOW
+    lo = max(0, i - WINDOW - 40 + 1)
+    sl = slice(lo, i + 1)
+    return bar_features(tape.minute[sl], tape.o[sl], tape.h[sl], tape.l[sl], tape.c[sl], tape.v[sl])
+
+
+def run(tape: Tape, strat, notional: float, collect_features: bool = False) -> List[Trade]:
+    """
+    Replays one strategy on one symbol under the current settings. With
+    collect_features, each Trade carries .features: the scorer's input at the
+    signal bar, for training (ml/train.py).
+    """
     state.is_trading_active = True
     trades: List[Trade] = []
     book: Optional[Book] = None
@@ -404,6 +416,8 @@ def run(tape: Tape, strat, notional: float) -> List[Trade]:
                 book = Book(tape, strat.name, i, float(tape.o[i]), notional)
                 if book.qty <= 0:
                     book = None
+                elif collect_features:
+                    book.trade.features = entry_features(tape, i - 1)
         if book is not None:
             t = _bar(tape, i, book, strat)
             if t is not None:

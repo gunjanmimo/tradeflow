@@ -30,6 +30,8 @@ ENTRY_CONTEXT_KEYS = frozenset({
     # break-even lock, and the original risk they are all measured against.
     "stop_breached_at", "initial_risk_ps", "initial_qty", "rescued", "rescue_attempt_at",
     "recovery_mode", "recovered",
+    # Profit from trend trims, so a closed trade's whole result is known (ml/experience.py).
+    "trimmed_pnl",
 })
 
 class AlpacaExecutor:
@@ -908,6 +910,7 @@ class AlpacaExecutor:
             else:
                 state.book_realized_pnl(symbol, pnl)
                 pos["trimmed"] = True
+                pos["trimmed_pnl"] = round(float(pos.get("trimmed_pnl") or 0.0) + pnl, 4)
             pos["qty"] = round(qty - sell, 8)
             pos["unrealized_pl"] = round((price - avg) * pos["qty"], 2)
             state.recent_trades.append({"time": time.time(), "symbol": symbol, "side": "SELL",
@@ -1134,6 +1137,12 @@ class AlpacaExecutor:
         }
         state.recent_trades.append(record)
         state.closed_trades.append(record)
+        # The trade scorer learns from this outcome (entry bars recorded at entry).
+        try:
+            from ml.experience import experience
+            experience.on_close(symbol, pos, pnl)
+        except Exception as e:
+            logger.debug(f"Could not record ML experience: {e}")
 
         # Persist to agent memory WITHOUT awaiting: a slow graph write must never
         # delay a liquidation. Failures are logged inside remember_trade.
