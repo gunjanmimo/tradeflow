@@ -248,6 +248,12 @@ async def lifespan(app: FastAPI):
     await discovery.start()
     loop_monitor_task = asyncio.create_task(monitor_event_loop())
 
+    # Trade scorer: import torch and load the model in a thread now (~0.8s), so
+    # the manager's first cycle does not stall the event loop doing it.
+    if settings.ML_MODE != "off":
+        from ml.model import scorer
+        await asyncio.get_running_loop().run_in_executor(None, lambda: scorer.ready)
+
     # 12. Agent fleet: trend analyst (reads the time series first), curator,
     # trader (the portfolio manager) and position manager.
     await fleet.start()
