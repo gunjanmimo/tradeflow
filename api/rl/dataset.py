@@ -140,6 +140,15 @@ def build(symbols: Optional[Sequence[str]] = None, workers: int = 8, use_cache: 
     tmp = path + ".tmp.npz"
     np.savez(tmp, symbols=np.asarray(names), **cat)
     os.replace(tmp, path)
+    # One cache is enough: each new day of bars makes the old one stale, and
+    # each is ~0.8 GB. Remove the rest.
+    import glob
+    for old in glob.glob(os.path.join(CACHE_DIR, "sessions_*.npz")):
+        if os.path.abspath(old) != os.path.abspath(path):
+            try:
+                os.remove(old)
+            except OSError:
+                pass
     return SessionSet(cat["bar"], cat["scal"], cat["o"], cat["h"], cat["l"], cat["c"], cat["atr"],
                       cat["sym"], cat["day"], names)
 

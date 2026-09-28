@@ -178,6 +178,18 @@ def champion_score(path: str, res: Dict[str, Any], ss) -> Optional[float]:
         return float("inf")
 
 
+def prune_candidates(model_dir: str, keep: int = 10):
+    """Keeps the newest `keep` candidates (weights + reports); the deployed policy is separate."""
+    import glob
+    cands = sorted(glob.glob(os.path.join(model_dir, "candidate-*.npz")))
+    for old in cands[:-keep]:
+        for ext in (".npz", ".json", ".md"):
+            try:
+                os.remove(old[:-4] + ext)
+            except OSError:
+                pass
+
+
 def render(report: Dict[str, Any]) -> str:
     L = [f"# PPO policy report ({report['trained_at']})", ""]
     s = report["splits"]
@@ -274,10 +286,19 @@ def main(argv=None):
     if deployed:
         export(res["model"], res["norm"], report, POLICY_PATH)
     md = render(report)
-    with open(os.path.join(MODEL_DIR, REPORT_PATH_NAME if not a.synthetic else "report_synthetic.json"), "w") as f:
-        json.dump(report, f, indent=1, default=lambda o: o.item() if hasattr(o, "item") else str(o))
-    with open(os.path.join(MODEL_DIR, "report.md" if not a.synthetic else "report_synthetic.md"), "w") as f:
-        f.write(md)
+    # Every candidate keeps its own report beside its weights; report.md/json
+    # always describe the DEPLOYED policy, so they change only on a deploy.
+    targets = [cand_path[:-4]]
+    if a.synthetic:
+        targets.append(os.path.join(MODEL_DIR, "report_synthetic"))
+    elif deployed:
+        targets.append(os.path.join(MODEL_DIR, "report"))
+    for base in targets:
+        with open(base + ".json", "w") as f:
+            json.dump(report, f, indent=1, default=lambda o: o.item() if hasattr(o, "item") else str(o))
+        with open(base + ".md", "w") as f:
+            f.write(md)
+    prune_candidates(MODEL_DIR)
     print("\n" + md)
     print(f"Candidate saved to {cand_path}" + (f"; deployed to {POLICY_PATH}" if deployed else ""))
     return report

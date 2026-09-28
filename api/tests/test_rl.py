@@ -282,3 +282,16 @@ def test_the_live_path_does_not_need_torch():
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                          cwd=__file__.rsplit("/tests/", 1)[0])
     assert out.stdout.strip() == "ok", out.stderr
+
+
+def test_old_candidates_are_pruned(tmp_path):
+    from rl.train import prune_candidates
+    for i in range(14):
+        for ext in (".npz", ".json", ".md"):
+            (tmp_path / f"candidate-2026092{i:02d}{ext}").write_text("x")
+    (tmp_path / "policy.npz").write_text("deployed")
+    prune_candidates(str(tmp_path), keep=10)
+    left = sorted(p.name for p in tmp_path.glob("candidate-*.npz"))
+    assert len(left) == 10 and left[0] == "candidate-202609204.npz"
+    assert (tmp_path / "policy.npz").exists()
+    assert not (tmp_path / "candidate-202609200.json").exists()
