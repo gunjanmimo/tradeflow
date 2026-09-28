@@ -185,6 +185,7 @@ The **Capital mode** chip in the header switches between two ways of managing mo
 Rules:
 - **Progress counts realised PnL only.** Unrealised gains are never banked.
 - **Stair never raises risk to reach a target.** Strategies, stops and the risk dial are unchanged.
+- **Main broker equity is locked.** When a budget or deposit is assigned to the bot in classic or stair mode, the main broker equity outside the budget cap is strictly locked (`locked_broker_equity = max(0, broker_equity - assigned_capital)`). The bot operates exclusively within its hard cap and never touches locked broker equity or cash.
 - **If trading capital falls below the smallest order the engine can place, new entries stop.** The reserve and banked income are never used to top it up.
 - **Stair refuses to start with capital too small to trade.** At risk dial 4, one position is capped at 15% of capital, so crypto needs at least $100 of trading capital (stocks $200).
 - **The engine cannot move money.** Reserve and banked income stay as cash at the broker; withdraw them there.
@@ -196,6 +197,64 @@ curl -X POST localhost:8000/api/capital-plan -H 'content-type: application/json'
      -d '{"mode":"stair","deposit":1000,"deploy_pct":0.5,"target_multiple":2,"harvest_pct":0.5}'
 curl -X POST localhost:8000/api/capital-plan -d '{"mode":"classic"}' -H 'content-type: application/json'
 ```
+
+---
+
+## 🧮 Daily Profit & Loss Calculator
+
+TradeFlow includes a built-in **Daily Profit & Loss Calculator & Expectancy Simulator**:
+- **Live Performance & Accounting:** Real-time breakdown of today's realized PnL, open unrealized PnL, net PnL, return % on bot budget, win rate %, and profit factor.
+- **Position Scenarios:** Evaluates potential outcomes if all active positions hit Take Profit (best case) vs Stop Loss (worst case).
+- **Interactive Expectancy Simulator:** Allows simulating expected value (EV) per trade, breakeven win rate, and projected daily PnL based on customizable target profit, max daily loss limit, win rate %, and reward-to-risk ratio.
+- **30-Day Historical Ledger:** Persisted daily performance records in `api/data/pnl_ledger.json`.
+
+```bash
+# Get today's PnL breakdown, 30-day history, and scenarios
+curl localhost:8000/api/daily-pnl
+
+# Run projection simulations
+curl -X POST localhost:8000/api/daily-pnl/calculator -H 'content-type: application/json' \
+     -d '{"target_daily_profit": 100, "max_daily_loss": 50, "planned_trades": 5, "win_rate_pct": 60, "reward_risk_ratio": 2.0, "risk_per_trade": 25}'
+```
+
+---
+
+## 🌍 Discovery & Diversification
+
+Discovery finds stocks you don't hold yet. Diversification keeps the book from being one bet. Both are driven by the same 1-10 risk dial.
+
+**Candidate pool** (`engine/discovery.py`). Candidates are kept separate from the watchlist and come from:
+- SEC Form 4 insider trades and eToro top-investor holdings, for any symbol, not only watched ones.
+- Our own universe screen: GICS sector leaders, US-listed ADRs of UK, European, Chinese, Japanese and Indian companies, and sector and country ETFs.
+
+Each candidate is scored on four components:
+
+| Component | Weight | Inputs |
+|---|---|---|
+| Smart money | 30% | Insider buys and sells, copy-trader holdings |
+| Public sentiment | 20% | Alpaca news scored by Laya, StockTwits bull/bear ratio |
+| Momentum | 30% | 12-1m momentum, 3m strength vs its sector ETF, 200-day trend |
+| Diversification fit | 20% | Sleeve headroom, under-target regions, correlation with holdings |
+
+Missing components don't vote. Nothing is traded until you promote a candidate to the watchlist.
+
+**Classification** (`core/universe.py`). Every symbol gets a GICS sector, theme, country, region and currency. Unknown US tickers are classified from their SEC SIC code. Foreign listings (`.L`, `.NS`, `.HK`...) map to their US ADR when one exists. Otherwise they stay visible but untradable, with a country ETF offered as the proxy. Alpaca only trades US listings, so Indian energy and defence names are reachable only through INDA, EPI or SMIN.
+
+**Entry gate** (`engine/diversification.py`). Every buy is clamped to the headroom in its sleeves:
+
+| Dial | Sector | Crypto | US | Europe / Asia | Min defensive | Correlation halving at |
+|---|---|---|---|---|---|---|
+| 1 | 20% | 5% | 50% | 20% | 30% | 0.60 |
+| 4 (default) | 30% | 15% | 60% | 20% | 20% | 0.75 |
+| 10 | 50% | 35% | 90% | 40% | 0% | 0.90 |
+
+- Percentages are of the trading budget. Levels 2, 3 and 5–9 are in `core/risk_profile.py`.
+- A new position more correlated than the limit with an existing holding gets half size.
+- An entry with no headroom is refused.
+
+**Risk analysis.** Computed from about 90 days of daily returns: portfolio volatility, parametric and historical 1-day VaR/CVaR, diversification ratio, effective number of bets, and each sector's and region's share of total risk. The what-if view shows how a standard-size position in any candidate would change these numbers.
+
+Open it from the **Discovery** chip in the dashboard header. API: `/api/discovery`, `/api/discovery/promote`, `/api/discovery/what-if/{symbol}`, `/api/diversification`.
 
 ---
 

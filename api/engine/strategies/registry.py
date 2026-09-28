@@ -3,7 +3,7 @@ Strategy registry: which strategy runs on which symbol.
 
 Resolution order, most specific first:
   1. explicit per-symbol override   (state.strategy_overrides["BTC/USD"])
-  2. asset-class default            (crypto -> momentum, equity -> news_catalyst)
+  2. asset-class default            (crypto -> momentum, equity -> stock_score)
 
 Defaults are asset-class-aware because the two classes offer different
 information. See engine/strategies/base.py for the reasoning; in short, equities
@@ -21,6 +21,7 @@ from core.state import is_crypto_symbol
 from engine.strategies.base import Strategy
 from engine.strategies.momentum import MomentumBreakoutStrategy
 from engine.strategies.news_catalyst import NewsCatalystStrategy
+from engine.strategies.stock_score import StockScoreStrategy
 from engine.strategies.mean_reversion import MeanReversionStrategy
 from engine.strategies.library import LIBRARY
 from engine.strategies.adaptive import AdaptiveStrategy
@@ -32,6 +33,7 @@ _STRATEGIES: Dict[str, Strategy] = {
     s.name: s for s in (
         MomentumBreakoutStrategy(),
         NewsCatalystStrategy(),
+        StockScoreStrategy(),
         MeanReversionStrategy(),
         AdaptiveStrategy(),
         *(cls() for cls in LIBRARY),
@@ -41,7 +43,7 @@ _STRATEGIES: Dict[str, Strategy] = {
 # Asset-class defaults
 DEFAULT_BY_CLASS: Dict[str, str] = {
     "crypto": "momentum_breakout",
-    "equity": "news_catalyst",
+    "equity": "stock_score",
 }
 
 

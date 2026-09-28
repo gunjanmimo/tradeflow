@@ -8,12 +8,16 @@ Engine constraints this wraps (verified against hydradb 0.1.0, not guesses)
 2. `CREATE` only accepts ONE-HOP EDGE PATTERNS: `(a {id:N})-[:R]->(b {id:M})`.
    A bare single-node CREATE is rejected ("only one-hop edge patterns are
    executable"), so standalone nodes are attached to an anchor node instead.
-3. `MERGE` is unsupported. Upsert is emulated as CREATE-then-SET; re-creating an
-   existing id is idempotent at the vertex level.
+3. `MERGE` is unsupported. Upsert is emulated by inlining all properties in
+   CREATE; re-creating an existing id is idempotent at the vertex level.
 4. Aggregates are unreliable -- `count()` errors outright and `avg()` demands
    integers. All statistics are therefore computed in Python over returned rows.
    Trade volumes are in the thousands, so this is not a performance concern.
 5. A node-only `MATCH` needs an id, label, or property predicate.
+6. `MATCH…SET` triggers `PutMode::Update` in the underlying SlateDB storage
+   layer, which the LocalFileSystem object-store backend does NOT implement.
+   All property mutations must therefore be done by inlining props in CREATE
+   (for new nodes) or DELETE-then-CREATE (for existing nodes).
 
 Failure policy
 --------------
@@ -25,7 +29,6 @@ import asyncio
 import hashlib
 import logging
 import os
-import time
 from typing import Any, Dict, List, Optional
 
 import aiohttp
@@ -112,6 +115,17 @@ class HydraClient:
 
         Never raises: a memory outage must degrade recall, not halt trading.
         """
+        return (await self._execute(cypher, params, quiet))[1]
+
+    async def write(self, cypher: str, params: Optional[Dict[str, Any]] = None) -> bool:
+        """
+        Runs a write statement; True only if the engine accepted it. A CREATE
+        returns no rows either way, so query()'s [] cannot tell success from failure.
+        """
+        return (await self._execute(cypher, params, quiet=True))[0]
+
+    async def _execute(self, cypher: str, params: Optional[Dict[str, Any]],
+                       quiet: bool) -> "tuple[bool, List[Dict[str, Any]]]":
         payload: Dict[str, Any] = {"cell_id": self.cell_id, "query": cypher}
         if params:
             payload["parameters"] = params
@@ -127,13 +141,13 @@ class HydraClient:
                     self.queries_failed += 1
                     if not quiet:
                         logger.warning(f"HydraDB query rejected: {msg} | {cypher[:120]}")
-                    return []
+                    return False, []
 
                 self.queries_ok += 1
                 self.is_available = True
                 cols = body.get("columns", []) or []
                 rows = body.get("rows", []) or []
-                return [
+                return True, [
                     {cols[i]: self._unwrap(cell) for i, cell in enumerate(row) if i < len(cols)}
                     for row in rows
                 ]
@@ -143,32 +157,12 @@ class HydraClient:
             self.is_available = False
             if not quiet:
                 logger.debug(f"HydraDB unreachable: {e}")
-            return []
+            return False, []
 
     # ------------------------------------------------------------------
-    async def upsert_node(self, label: str, key: str,
-                          props: Dict[str, Any]) -> int:
-        """
-        Creates or updates a node identified by `key`.
-
-        Emulates MERGE (unsupported by the engine) as CREATE-via-anchor then SET.
-        Re-running is safe: creating an existing vertex id does not duplicate it,
-        and SET then reconciles the properties.
-        """
-        node_id = stable_id(key)
-        anchor_id = stable_id(self.ANCHOR_KEY)
-
-        # One-hop edge CREATE is the only executable form, so every standalone
-        # node is born attached to the anchor.
-        await self.query(
-            f"CREATE (a:Anchor {{id: $anchor}})-[:HAS]->(n:{label} {{id: $nid}})",
-            {"anchor": anchor_id, "nid": node_id}, quiet=True,
-        )
-        await self.set_props(label, node_id, {**props, "key": key})
-        return node_id
-
-    async def set_props(self, label: str, node_id: int, props: Dict[str, Any]) -> bool:
-        """SET a node's properties. Only scalar types are accepted by the engine."""
+    @staticmethod
+    def _clean_props(props: Dict[str, Any]) -> Dict[str, Any]:
+        """Filter and coerce property values to engine-accepted scalars."""
         clean = {}
         for k, v in props.items():
             if v is None:
@@ -177,14 +171,74 @@ class HydraClient:
                 clean[k] = v
             else:
                 clean[k] = str(v)
+        return clean
+
+    async def upsert_node(self, label: str, key: str,
+                          props: Dict[str, Any]) -> int:
+        """
+        Creates or updates a node identified by `key`.
+
+        Properties are embedded directly in the CREATE statement to avoid the
+        MATCH…SET pattern, which requires PutMode::Update — an operation the
+        LocalFileSystem object-store backend does not implement. Re-creating an
+        existing vertex id is idempotent at the vertex level, and inline
+        properties are applied on creation.
+        """
+        node_id = stable_id(key)
+        anchor_id = stable_id(self.ANCHOR_KEY)
+
+        all_props = self._clean_props({**props, "key": key, "id": node_id})
+
+        # Build inline property map: {id: $nid, key: $key, bot_id: $bot_id, …}
+        prop_fragment = ", ".join(f"{k}: ${k}" for k in all_props)
+        await self.query(
+            f"CREATE (a:Anchor {{id: $anchor}})-[:HAS]->"
+            f"(n:{label} {{{prop_fragment}}})",
+            {"anchor": anchor_id, **all_props}, quiet=True,
+        )
+        return node_id
+
+    async def set_props(self, label: str, node_id: int, props: Dict[str, Any]) -> bool:
+        """
+        Update a node's properties.
+
+        The LocalFileSystem object-store backend does not support
+        PutMode::Update, which makes MATCH…SET fail. As a workaround we
+        DELETE the node and re-CREATE it via the anchor with all properties
+        inlined in the CREATE statement.
+        """
+        clean = self._clean_props(props)
         if not clean:
             return False
-        assignments = ", ".join(f"n.{k} = ${k}" for k in clean)
+
+        # First, read current properties so we can merge old + new.
         rows = await self.query(
-            f"MATCH (n:{label} {{id: $nid}}) SET {assignments}",
-            {"nid": node_id, **clean},
+            f"MATCH (n:{label} {{id: $nid}}) RETURN n",
+            {"nid": node_id}, quiet=True,
         )
-        return rows is not None
+        existing: Dict[str, Any] = {}
+        if rows:
+            raw = rows[0].get("n", {})
+            if isinstance(raw, dict):
+                existing = {k: self._unwrap(v) for k, v in raw.items()}
+
+        merged = {**existing, **clean, "id": node_id}
+
+        # Delete old node (DETACH DELETE removes the node and its edges).
+        await self.query(
+            f"MATCH (n:{label} {{id: $nid}}) DETACH DELETE n",
+            {"nid": node_id}, quiet=True,
+        )
+
+        # Re-create with anchor edge and all properties inline.
+        anchor_id = stable_id(self.ANCHOR_KEY)
+        prop_fragment = ", ".join(f"{k}: ${k}" for k in merged)
+        await self.query(
+            f"CREATE (a:Anchor {{id: $anchor}})-[:HAS]->"
+            f"(n:{label} {{{prop_fragment}}})",
+            {"anchor": anchor_id, **merged}, quiet=True,
+        )
+        return True
 
     async def link(self, from_label: str, from_key: str, rel: str,
                    to_label: str, to_key: str,
@@ -193,17 +247,29 @@ class HydraClient:
         """
         Creates an edge, materialising both endpoints in the same statement --
         which is exactly the one-hop pattern the engine supports.
+
+        All properties are inlined in the CREATE to avoid MATCH…SET (which
+        requires PutMode::Update, unsupported by LocalFileSystem).
         """
         fid, tid = stable_id(from_key), stable_id(to_key)
-        ok = await self.query(
-            f"CREATE (a:{from_label} {{id: $fid}})-[:{rel}]->(b:{to_label} {{id: $tid}})",
-            {"fid": fid, "tid": tid}, quiet=True,
-        ) is not None
-        if from_props:
-            await self.set_props(from_label, fid, {**from_props, "key": from_key})
-        if to_props:
-            await self.set_props(to_label, tid, {**to_props, "key": to_key})
-        return ok
+
+        from_all = self._clean_props({**(from_props or {}), "key": from_key, "id": fid})
+        to_all = self._clean_props({**(to_props or {}), "key": to_key, "id": tid})
+
+        # Build inline property fragments
+        from_frag = ", ".join(f"{k}: $from_{k}" for k in from_all)
+        to_frag = ", ".join(f"{k}: $to_{k}" for k in to_all)
+
+        params: Dict[str, Any] = {}
+        params.update({f"from_{k}": v for k, v in from_all.items()})
+        params.update({f"to_{k}": v for k, v in to_all.items()})
+
+        return await self.write(
+            f"CREATE (a:{from_label} {{{from_frag}}})"
+            f"-[:{rel}]->"
+            f"(b:{to_label} {{{to_frag}}})",
+            params,
+        )
 
     # ------------------------------------------------------------------
     async def health(self) -> Dict[str, Any]:
@@ -226,12 +292,17 @@ class HydraClient:
     async def initialize(self) -> bool:
         """Creates the anchor node and confirms reachability."""
         anchor_id = stable_id(self.ANCHOR_KEY)
+        self_id = stable_id(self.ANCHOR_KEY + ":self")
+        # Deterministic payload: HydraDB restarts its request ids at http-query-1
+        # after a restart, so a timestamp here made the same idempotency key arrive
+        # with a different payload and the anchor write was rejected as a conflict.
         await self.query(
-            "CREATE (a:Anchor {id: $id})-[:SELF]->(b:Anchor {id: $id2})",
-            {"id": anchor_id, "id2": stable_id(self.ANCHOR_KEY + ":self")}, quiet=True,
+            "CREATE (a:Anchor {id: $id, key: $key})"
+            "-[:SELF]->"
+            "(b:Anchor {id: $id2, key: $key2})",
+            {"id": anchor_id, "key": self.ANCHOR_KEY,
+             "id2": self_id, "key2": self.ANCHOR_KEY + ":self"}, quiet=True,
         )
-        await self.set_props("Anchor", anchor_id,
-                             {"key": self.ANCHOR_KEY, "created_at": time.time()})
         rows = await self.query(
             "MATCH (a:Anchor {id: $id}) RETURN a.id AS id", {"id": anchor_id}, quiet=True,
         )

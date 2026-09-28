@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Set
 
 from core.config import settings
 from core.state import state, ScoredHeadline, is_crypto_symbol
-from sentiment.laya_service import laya_service
+from sentiment.router import sentiment_service
 
 logger = logging.getLogger("tradeflow.news")
 
@@ -105,10 +105,32 @@ class NewsFeedManager:
     # Ingestion
     # ------------------------------------------------------------------
     def _equity_symbols(self) -> List[str]:
-        return [s for s in state.watchlist if not is_crypto_symbol(s)]
+        return [s for s in self._tracked() if not is_crypto_symbol(s)]
+
+    @staticmethod
+    def _wanted(symbol: str) -> bool:
+        """
+        Whether this symbol's news is worth fetching and scoring. A market or
+        symbol switched off in the UI is skipped, so a paused crypto market costs
+        no Laya time. A held position is always kept: its sentinel still reads
+        sentiment to manage the exit.
+        """
+        from core.market_filter import market_filter
+        return symbol in state.active_positions or market_filter.entry_block_reason(symbol) is None
+
+    @classmethod
+    def _tracked(cls) -> Set[str]:
+        """
+        Watchlist plus the top discovery candidates. Candidates get their public
+        news sentiment scored by Laya so they can be judged before promotion;
+        they are never traded unless promoted onto the watchlist.
+        """
+        from engine.discovery import discovery
+        return {s for s in set(state.watchlist) | set(discovery.sentiment_symbols())
+                if cls._wanted(s)}
 
     def _crypto_symbols(self) -> List[str]:
-        return [s for s in state.watchlist if is_crypto_symbol(s)]
+        return [s for s in state.watchlist if is_crypto_symbol(s) and self._wanted(s)]
 
     def _fetch_sync(self, symbols_csv: str, start: datetime, limit: int = 50) -> List:
         """Blocking Alpaca call, run in the executor so the tick loop never waits."""
@@ -170,7 +192,7 @@ class NewsFeedManager:
         return new_count
 
     async def _ingest_item(self, item) -> int:
-        """Scores one news item against each watchlist symbol it mentions."""
+        """Scores one news item against each tracked symbol it mentions."""
         news_id = str(getattr(item, "id", "") or "")
         if not news_id or state.is_news_seen(news_id):
             return 0
@@ -186,13 +208,14 @@ class NewsFeedManager:
         # Map Alpaca's symbols back onto our watchlist spelling
         raw_syms = list(getattr(item, "symbols", []) or [])
         targets: Set[str] = set()
+        tracked = self._tracked()
         for rs in raw_syms:
             rs_u = rs.upper()
-            if rs_u in state.watchlist:
+            if rs_u in tracked:
                 targets.add(rs_u)
                 continue
             for pair, (key, _name) in CRYPTO_NEWS_KEYS.items():
-                if rs_u == key and pair in state.watchlist:
+                if rs_u == key and pair in state.watchlist and self._wanted(pair):
                     targets.add(pair)
 
         if not targets:
@@ -208,9 +231,9 @@ class NewsFeedManager:
         scored = 0
         for sym in targets:
             try:
-                rec = await laya_service.score_headline(sym, text, persist=False)
+                rec = await sentiment_service.score_headline(sym, text, persist=False)
             except Exception as e:
-                logger.error(f"Laya scoring failed for {sym}: {e}")
+                logger.error(f"Sentiment scoring failed for {sym}: {e}")
                 continue
             state.record_headline(ScoredHeadline(
                 news_id=f"{news_id}:{sym}",

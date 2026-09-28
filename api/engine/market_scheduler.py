@@ -64,13 +64,18 @@ class MarketSessionScheduler:
 
         def fetch():
             clock = executor.trading_client.get_clock()
-            return clock.is_open, clock.next_open.isoformat()
+            next_close = getattr(clock, "next_close", None)
+            return (clock.is_open, clock.next_open.isoformat(),
+                    next_close.isoformat() if next_close else None)
 
         def done(fut):
             self._clock_inflight = False
             self._clock_at = _time.time()
             try:
-                self._clock_cache = fut.result()
+                is_open, next_open, next_close = fut.result()
+                self._clock_cache = (is_open, next_open)
+                # While the market is open this is TODAY's close, half-days included.
+                self._next_close_iso = next_close
             except Exception as e:
                 logger.debug(f"Clock refresh failed, keeping last value: {e}")
 

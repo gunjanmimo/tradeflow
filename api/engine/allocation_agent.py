@@ -29,11 +29,12 @@ class LayaAllocationManager:
         """
         # Strict Capital Budget: Do NOT use the entire 100k account equity!
         # Base calculations on user-configured allocated capital budget (default $10,000.00)
-        account_equity = float(state.account_info.get("equity", 100000.0))
-        budget = state.allocated_capital
-        equity = min(account_equity, budget)
-        cash = float(state.account_info.get("cash", 100000.0))
-        remaining_budget = state.remaining_budget
+        # The hard cap already reflects realised losses, and remaining_budget is
+        # measured on cost basis plus in-flight buys (see core/state.py).
+        equity = state.budget_base
+        bot_cash = state.bot_cash
+        # Hold back a fill buffer so market-order slippage cannot breach the cap.
+        remaining_budget = state.remaining_budget / (1 + settings.BUDGET_FILL_BUFFER_PCT / 100.0)
 
         # 1. Conviction Multiplier from Laya & Consensus.
         # An absent consensus (no real source covered this symbol) contributes a
@@ -88,14 +89,25 @@ class LayaAllocationManager:
         allocated_dollars = min(uncapped_dollars, notional_cap, remaining_budget)
         notional_capped = uncapped_dollars > min(notional_cap, remaining_budget) + 1e-9
 
-        # 4. Cash and per-position notional caps
+        # Diversification headroom: the sector/region/crypto sleeve this symbol
+        # belongs to may have less room than the single-position cap allows, and
+        # a position highly correlated with a holding is halved.
+        from engine.diversification import diversification
+        div = diversification.assess(symbol)
+        div_note = ""
+        if div.max_dollars < allocated_dollars:
+            allocated_dollars = div.max_dollars
+            why = div.notes[-1] if div.size_scale < 1.0 else div.binding
+            div_note = f" [DIVERSIFICATION-CAPPED to ${div.max_dollars:,.2f}: {why}]"
+
+        # 4. Cash and per-position notional caps: strictly within bot's hard cap
         if is_crypto_symbol(symbol):
             # Crypto on Alpaca is non-marginable and settles in USD cash.
             # Keep a 5% cushion for fees and price drift between sizing and fill.
-            safe_cash = max(0.0, cash * 0.95)
+            safe_cash = max(0.0, min(remaining_budget, bot_cash * 0.95))
             min_order_value = 15.0
         else:
-            safe_cash = max(0.0, cash - 100.0)
+            safe_cash = max(0.0, min(remaining_budget, bot_cash - 5.0))
             min_order_value = 30.0
 
         allocated_dollars = min(allocated_dollars, safe_cash)
@@ -103,9 +115,9 @@ class LayaAllocationManager:
         if allocated_dollars < min_order_value:
             return self._reject(
                 symbol, stop_loss_price, take_profit_price, conviction_tier, composite_conviction,
-                f"Laya Manager: Insufficient budget/cash for {symbol} "
-                f"(remaining ${remaining_budget:,.2f}, cash ${cash:,.2f}, "
-                f"need >= ${min_order_value:,.2f})."
+                f"Laya Manager: Insufficient bot budget/cash for {symbol} "
+                f"(remaining ${remaining_budget:,.2f}, bot cash ${bot_cash:,.2f}, "
+                f"need >= ${min_order_value:,.2f}). Main broker equity is locked."
             )
 
         # 5. Quantity at a precision appropriate to the asset's price scale.
@@ -156,7 +168,8 @@ class LayaAllocationManager:
             f"Consensus={consensus_component*100:.0f}%{'' if has_consensus else ' [NO REAL SOURCE]'}). "
             f"Risk ${actual_risk_dollars:,.2f} ({actual_risk_pct}% of budget) "
             f"to make ${actual_reward_dollars:,.2f}. Stop {stop_distance/current_price*100:.2f}% away "
-            f"(SL ${stop_loss_price} | TP ${take_profit_price}).{cap_note}"
+            f"(SL ${stop_loss_price} | TP ${take_profit_price}).{cap_note}{div_note}"
+            f" Sleeve: {div.meta.sector} / {div.meta.region}."
         )
 
         return {

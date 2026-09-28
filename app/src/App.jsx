@@ -1,6 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { LatencyChip, LatencyPanel, QuantDeskCard } from './QuantPanels';
 import { CapitalModeChip, CapitalPlanPanel } from './CapitalPlan';
+import { DiscoveryChip, DiscoveryPanel } from './DiscoveryPanel';
+import { ManagerChip, ManagerPanel } from './ManagerPanel';
+import { DailyPnlChip, DailyPnlCalculatorModal, IncomeChip } from './DailyPnlCalculator';
+import { MarketsModal } from './MarketsModal';
 import { HugeiconsIcon } from '@hugeicons/react';
 import { 
   Activity01Icon, 
@@ -70,7 +74,7 @@ const CircleDot = (props) => <HugeiconsIcon icon={CircleDotIcon} size="1em" {...
 const riskTone = (f) => (f <= 3 ? 'text-emerald-400' : f <= 6 ? 'text-amber-400' : 'text-rose-400');
 
 // Centered dialog with backdrop; closes on Escape or backdrop click
-function Modal({ title, icon, onClose, children, wide = false }) {
+function Modal({ title, icon, onClose, children, wide = false, xl = false }) {
   useEffect(() => {
     const onKey = (e) => e.key === 'Escape' && onClose();
     window.addEventListener('keydown', onKey);
@@ -81,7 +85,7 @@ function Modal({ title, icon, onClose, children, wide = false }) {
       <div
         role="dialog"
         aria-modal="true"
-        className={`w-full ${wide ? 'max-w-4xl' : 'max-w-md'} rounded-2xl bg-[#0f1624] ring-1 ring-white/10 shadow-2xl shadow-black/50 p-6`}
+        className={`w-full ${xl ? 'max-w-6xl max-h-[92vh] overflow-y-auto' : wide ? 'max-w-4xl' : 'max-w-md'} rounded-2xl bg-[#0f1624] ring-1 ring-white/10 shadow-2xl shadow-black/50 p-6`}
         onMouseDown={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-2">
@@ -107,7 +111,8 @@ export default function App() {
   const [telemetry, setTelemetry] = useState({
     is_trading_active: false,
     account: { equity: 100000, cash: 100000, buying_power: 200000 },
-    budget: { allocated_capital: 10000, total_position_exposure: 0, remaining_budget: 10000, utilization_pct: 0 },
+    budget: { allocated_capital: 10000, hard_cap: 10000, committed_capital: 0, total_position_exposure: 0, remaining_budget: 10000, utilization_pct: 0 },
+    daily_pnl: { realized_pnl: 0, unrealized_pnl: 0, net_pnl: 0, return_pct: 0, closed_trades: 0 },
     positions: {},
     watchlist: ["NVDA", "AAPL", "TSLA", "MSFT", "AMZN"],
     latest_prices: {},
@@ -154,6 +159,10 @@ export default function App() {
   // are pushed into state once per ping, every 2s.
   const [isLatencyOpen, setIsLatencyOpen] = useState(false);
   const [isCapitalOpen, setIsCapitalOpen] = useState(false);
+  const [isDiscoveryOpen, setIsDiscoveryOpen] = useState(false);
+  const [isManagerOpen, setIsManagerOpen] = useState(false);
+  const [isPnlCalcOpen, setIsPnlCalcOpen] = useState(false);
+  const [isMarketsOpen, setIsMarketsOpen] = useState(false);
   const [clientLatency, setClientLatency] = useState({ rttMs: null, rttP95: null, frameMs: null, ageMs: null });
   const pingSentRef = useRef(null);
   const rttSamplesRef = useRef([]);
@@ -368,15 +377,21 @@ export default function App() {
       unrealized_pl: pnl,
       unrealized_plpc: pnlpc,
       sentinel: sentinel,
-      buy_prob: sentinel?.buy_prob !== undefined ? sentinel.buy_prob : p.buy_prob,
-      sell_prob: sentinel?.sell_prob !== undefined ? sentinel.sell_prob : p.sell_prob,
-      close_prob: sentinel?.close_prob !== undefined ? sentinel.close_prob : p.close_prob,
+      action: sentinel?.action || p.action || "HOLD",
+      action_space: sentinel?.action_space || p.action_space || ["BUY", "HOLD", "SELL", "CLOSE"],
+      buy_prob: sentinel?.buy_prob !== undefined ? sentinel.buy_prob : (p.buy_prob !== undefined ? p.buy_prob : 0.15),
+      hold_prob: sentinel?.hold_prob !== undefined ? sentinel.hold_prob : (p.hold_prob !== undefined ? p.hold_prob : 0.70),
+      sell_prob: sentinel?.sell_prob !== undefined ? sentinel.sell_prob : (p.sell_prob !== undefined ? p.sell_prob : 0.10),
+      close_prob: sentinel?.close_prob !== undefined ? sentinel.close_prob : (p.close_prob !== undefined ? p.close_prob : 0.05),
       stop_loss: sentinel?.stop_loss || p.stop_loss,
       take_profit: sentinel?.take_profit || p.take_profit,
       bot_thesis: sentinel?.thesis || p.bot_thesis
     };
   });
   const totalPnL = positionsList.reduce((acc, p) => acc + (p.unrealized_pl || 0), 0);
+  const hardCap = telemetry.budget?.hard_cap ?? telemetry.budget?.allocated_capital ?? 0;
+  const dailyPnl = telemetry.daily_pnl || {};
+  const dailyNetPnl = Number(dailyPnl.net_pnl ?? ((rp.realized_pnl_today || 0) + totalPnL));
   const trendsList = Object.values(telemetry.aggregated_trends || {});
   const clock = telemetry.market_clock || {};
 
@@ -392,7 +407,7 @@ export default function App() {
             </div>
             <div className="min-w-0">
               <h1 className="font-semibold text-lg leading-tight tracking-tight text-white">TradeFlow</h1>
-              <p className="hidden md:block text-[11px] text-slate-500 truncate">4-Pillar Consensus · Laya · Alpaca Sandbox</p>
+              <p className="hidden md:block text-[11px] text-slate-500 truncate">{['Own stock score', ...(telemetry.source_health?.real_sources_available || []), 'Laya news', 'Alpaca Paper'].join(' · ')}</p>
             </div>
           </div>
 
@@ -400,34 +415,50 @@ export default function App() {
           {(() => {
             const stocksLive = clock.is_us_market_open || clock.is_eu_market_open;
             const venues = [clock.is_us_market_open && 'US', clock.is_eu_market_open && 'EU'].filter(Boolean).join(' + ');
+            const stocksOn = telemetry.markets?.markets?.stocks !== false;
+            const cryptoOn = telemetry.markets?.markets?.crypto !== false;
             return (
               <div
                 className="hidden lg:flex items-center rounded-full bg-white/[0.03] ring-1 ring-white/10 text-xs font-medium"
                 title={stocksLive ? `Stock markets open: ${venues}` : `Stock markets closed · next US open: ${clock.next_us_open || '09:30 AM EST'}`}
               >
-                <div className="flex items-center gap-2 pl-3 pr-3 py-1.5">
-                  <span className={`w-2 h-2 rounded-full ${stocksLive ? 'bg-emerald-400 animate-pulse shadow-[0_0_8px] shadow-emerald-400' : 'bg-slate-500'}`} />
+                <button type="button" onClick={() => setIsMarketsOpen(true)} className="flex items-center gap-2 pl-3 pr-3 py-1.5 rounded-l-full hover:bg-white/[0.05] transition-colors">
+                  <span className={`w-2 h-2 rounded-full ${!stocksOn ? 'bg-rose-500' : stocksLive ? 'bg-emerald-400 animate-pulse shadow-[0_0_8px] shadow-emerald-400' : 'bg-slate-500'}`} />
                   <span className="text-slate-400">Stocks</span>
                   <span className={stocksLive ? 'text-emerald-300 font-semibold' : 'text-slate-300'}>
                     {stocksLive ? `LIVE${venues ? ` · ${venues}` : ''}` : 'CLOSED'}
                   </span>
-                </div>
+                  {!stocksOn && <span className="text-rose-300 font-semibold">· OFF</span>}
+                </button>
                 <span className="w-px h-4 bg-white/10" />
-                <div className="flex items-center gap-2 pl-3 pr-3 py-1.5" title="Crypto trades 24/7">
-                  <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+                <button type="button" onClick={() => setIsMarketsOpen(true)} className="flex items-center gap-2 pl-3 pr-3 py-1.5 rounded-r-full hover:bg-white/[0.05] transition-colors" title="Crypto trades 24/7 · click to switch markets on/off">
+                  <span className={`w-2 h-2 rounded-full ${cryptoOn ? 'bg-cyan-400 animate-pulse' : 'bg-rose-500'}`} />
                   <span className="text-slate-400">Crypto</span>
-                  <span className="text-cyan-300 font-semibold">24/7</span>
-                </div>
+                  <span className={cryptoOn ? 'text-cyan-300 font-semibold' : 'text-rose-300 font-semibold'}>{cryptoOn ? '24/7' : 'OFF'}</span>
+                </button>
               </div>
             );
           })()}
 
           {/* Right cluster: stat chips + actions */}
           <div className="flex items-center gap-2">
-            <div className="hidden xl:flex flex-col items-end px-3">
-              <span className="text-[10px] uppercase tracking-wider text-slate-500">Broker equity</span>
+            {/* Main Broker Equity (Locked outside bot budget) */}
+            <div className="hidden xl:flex flex-col items-end px-3 py-1 rounded-xl bg-white/[0.02] ring-1 ring-white/5" title="Main broker equity is locked outside bot budget. Bot cannot touch outside the cap.">
+              <span className="text-[10px] uppercase tracking-wider text-slate-500 flex items-center gap-1">
+                <Lock className="w-2.5 h-2.5 text-amber-400" />
+                Broker equity
+              </span>
               <span className="text-sm font-mono text-slate-300">
-                ${(telemetry.account?.equity || 100000).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                ${(telemetry.budget?.locked_broker_equity ?? Math.max(0, (telemetry.account?.equity || 100000) - hardCap)).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                <span className="text-[10px] text-amber-400/90 ml-1 font-sans">Locked</span>
+              </span>
+            </div>
+
+            {/* Bot Equity */}
+            <div className="hidden 2xl:flex flex-col items-end px-3 py-1 rounded-xl bg-cyan-400/[0.03] ring-1 ring-cyan-400/20" title="Bot account equity: allocated budget + realized & unrealized bot PnL.">
+              <span className="text-[10px] uppercase tracking-wider text-cyan-400/90 font-medium">Bot Equity</span>
+              <span className="text-sm font-mono font-semibold text-white">
+                ${Number(telemetry.budget?.bot_equity ?? hardCap).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </span>
             </div>
 
@@ -436,6 +467,12 @@ export default function App() {
 
             {/* Capital mode chip (classic / stair) -> opens capital plan */}
             <CapitalModeChip plan={telemetry.capital_plan} onClick={() => setIsCapitalOpen(true)} />
+
+            {/* Discovery chip -> candidates, diversification and portfolio risk */}
+            <DiscoveryChip brief={telemetry.diversification} onClick={() => setIsDiscoveryOpen(true)} />
+
+            {/* Manager chip -> what the portfolio manager is deploying, and why budget is idle */}
+            <ManagerChip manager={telemetry.manager} onClick={() => setIsManagerOpen(true)} />
 
             {/* Budget chip -> opens modal */}
             <button
@@ -449,9 +486,9 @@ export default function App() {
             >
               <Wallet className="w-4 h-4 text-cyan-400" />
               <div className="flex flex-col">
-                <span className="text-[10px] uppercase tracking-wider text-slate-500 leading-none">Budget</span>
+                <span className="text-[10px] uppercase tracking-wider text-slate-500 leading-none">Hard cap</span>
                 <span className="text-sm font-mono font-semibold text-white leading-tight">
-                  ${(telemetry.budget?.allocated_capital || 10000).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                  ${hardCap.toLocaleString(undefined, { maximumFractionDigits: 0 })}
                 </span>
                 <div className="w-full h-0.5 bg-white/10 rounded-full overflow-hidden">
                   <div style={{ width: `${Math.min(100, telemetry.budget?.utilization_pct || 0)}%` }} className="h-full bg-cyan-400 transition-all duration-300" />
@@ -479,7 +516,13 @@ export default function App() {
               <Sliders className="w-3 h-3 text-slate-500 group-hover:text-amber-300" />
             </button>
 
-            <div className="flex flex-col items-end px-3">
+            {/* Daily PnL chip -> opens Daily Profit and Loss Calculator */}
+            {/* Income chip: profit banked today by the harvest */}
+            <IncomeChip dailyPnl={dailyPnl} onClick={() => setIsPnlCalcOpen(true)} />
+
+            <DailyPnlChip dailyPnl={dailyPnl} onClick={() => setIsPnlCalcOpen(true)} />
+
+            <div className="hidden 2xl:flex flex-col items-end px-3">
               <span className="text-[10px] uppercase tracking-wider text-slate-500">Open PnL</span>
               <span className={`text-sm font-mono font-semibold ${totalPnL >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                 {totalPnL >= 0 ? '+' : ''}${totalPnL.toFixed(2)}
@@ -493,7 +536,7 @@ export default function App() {
               onClick={triggerMorningSync}
               disabled={isSyncingTrends}
               className="w-9 h-9 flex items-center justify-center rounded-xl text-cyan-400 bg-white/[0.03] ring-1 ring-white/10 hover:ring-cyan-400/50 hover:bg-cyan-400/10 transition-all"
-              title="Morning Sync: SEC + eToro + Dub + StockTwits, scored with Laya"
+              title="Morning Sync: SEC Form 4 + eToro + StockTwits (when reachable), news scored with Laya"
             >
               <RefreshCw className={`w-4 h-4 ${isSyncingTrends ? 'animate-spin' : ''}`} />
             </button>
@@ -547,15 +590,54 @@ export default function App() {
         </Modal>
       )}
 
+      {/* Discovery & diversification modal */}
+      {isDiscoveryOpen && (
+        <Modal xl title="Discovery & diversification" icon={<Globe className="w-4 h-4 text-cyan-400" />} onClose={() => setIsDiscoveryOpen(false)}>
+          <DiscoveryPanel apiBase={API_BASE} positions={telemetry.positions} />
+        </Modal>
+      )}
+
+      {/* Portfolio manager modal */}
+      {isManagerOpen && (
+        <Modal xl title="Agent fleet" icon={<Bot className="w-4 h-4 text-cyan-400" />} onClose={() => setIsManagerOpen(false)}>
+          <ManagerPanel manager={telemetry.manager} positions={telemetry.positions} fleet={telemetry.fleet} />
+        </Modal>
+      )}
+
+      {/* Daily Profit and Loss Calculator Modal */}
+      <MarketsModal
+        isOpen={isMarketsOpen}
+        onClose={() => setIsMarketsOpen(false)}
+        markets={telemetry.markets}
+        positions={telemetry.positions}
+        apiBase={API_BASE}
+        onChange={(markets) => setTelemetry((t) => ({ ...t, markets }))}
+      />
+      <DailyPnlCalculatorModal
+        isOpen={isPnlCalcOpen}
+        onClose={() => setIsPnlCalcOpen(false)}
+        telemetry={telemetry}
+        apiBase={API_BASE}
+      />
+
       {/* Budget modal */}
       {isEditingBudget && (
         <Modal onClose={() => setIsEditingBudget(false)} title="Bot budget cap" icon={<Wallet className="w-4 h-4 text-cyan-400" />}>
-          <p className="text-xs text-slate-400 mb-4">The maximum capital the bot may deploy across all positions.</p>
+          <p className="text-xs text-slate-400 mb-3">The hard maximum capital the bot may commit across all positions and pending buys.</p>
+
+          {/* Locked Main Broker Equity Guarantee Banner */}
+          <div className="flex items-center justify-between p-2.5 mb-4 rounded-xl bg-amber-500/[0.05] ring-1 ring-amber-500/20 text-xs">
+            <span className="flex items-center gap-1.5 text-slate-300">
+              <Lock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              Main broker equity locked: <strong className="text-white">${(telemetry.budget?.locked_broker_equity ?? Math.max(0, (telemetry.account?.equity || 100000) - hardCap)).toLocaleString(undefined, { maximumFractionDigits: 0 })}</strong>
+            </span>
+            <span className="text-[10px] text-amber-300 font-mono px-2 py-0.5 rounded bg-amber-400/10">Protected</span>
+          </div>
 
           <div className="grid grid-cols-3 gap-2 mb-5 text-center">
             {[
-              ['Current cap', `$${(telemetry.budget?.allocated_capital || 10000).toLocaleString(undefined, { maximumFractionDigits: 0 })}`, 'text-white'],
-              ['In use', `$${(telemetry.budget?.total_position_exposure || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}`, 'text-cyan-300'],
+              ['Hard cap', `$${hardCap.toLocaleString(undefined, { maximumFractionDigits: 0 })}`, 'text-white'],
+              ['Committed', `$${(telemetry.budget?.committed_capital || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}`, 'text-cyan-300'],
               ['Utilization', `${telemetry.budget?.utilization_pct || 0}%`, 'text-slate-200'],
             ].map(([k, v, c]) => (
               <div key={k} className="rounded-xl bg-white/[0.03] ring-1 ring-white/10 py-2">
@@ -563,6 +645,41 @@ export default function App() {
                 <div className={`font-mono text-sm font-semibold ${c}`}>{v}</div>
               </div>
             ))}
+          </div>
+
+          <div className="rounded-xl bg-white/[0.03] ring-1 ring-white/10 p-3 mb-5">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[10px] uppercase tracking-wider text-slate-500">Today’s bot P&amp;L</span>
+              <div className="flex items-center gap-2">
+                <span className={`font-mono text-sm font-semibold ${dailyNetPnl >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>
+                  {dailyNetPnl >= 0 ? '+' : ''}${dailyNetPnl.toFixed(2)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => { setIsEditingBudget(false); setIsPnlCalcOpen(true); }}
+                  className="text-[10px] text-emerald-400 hover:text-emerald-300 underline font-medium ml-1"
+                >
+                  Calculator 🧮
+                </button>
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-2 text-center">
+              {[
+                ['Realised', dailyPnl.realized_pnl || 0],
+                ['Open', dailyPnl.unrealized_pnl || 0],
+                ['Closed', `${dailyPnl.closed_trades || 0} trades`],
+              ].map(([label, value]) => {
+                const numeric = typeof value === 'number';
+                return (
+                  <div key={label}>
+                    <div className="text-[10px] uppercase tracking-wider text-slate-500">{label}</div>
+                    <div className={`font-mono text-xs ${numeric ? (value >= 0 ? 'text-emerald-300' : 'text-rose-300') : 'text-slate-200'}`}>
+                      {numeric ? `${value >= 0 ? '+' : ''}$${value.toFixed(2)}` : value}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
 
           <form onSubmit={(e) => { e.preventDefault(); saveBudget(budgetInput); }}>
@@ -691,16 +808,22 @@ export default function App() {
       {/* Main Grid Body */}
       <main className="flex-1 p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
         
-        {/* Left Column: Watchlist & 4-Pillar Intelligence (7 Cols) */}
+        {/* Left Column: Watchlist & Smart-Money Intelligence (7 Cols) */}
         <section className="lg:col-span-7 flex flex-col space-y-6">
 
-          {/* NEW CARD: 4-Pillar Market Intelligence (SEC + eToro + Dub + StockTwits) */}
+          {/* Smart-money consensus: only the sources that actually answered this cycle */}
           <div className="bg-[#0f172a]/70 border border-cyan-900/40 rounded-2xl p-5 shadow-xl relative overflow-hidden">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center space-x-2">
                 <Compass className="w-5 h-5 text-cyan-400" />
                 <h2 className="font-semibold text-base text-slate-100">
-                  4-Pillar Consensus Engine (SEC + eToro + Dub + StockTwits)
+                  Smart-Money Consensus
+                  <span className="ml-2 text-xs font-normal text-slate-500">
+                    {(telemetry.source_health?.real_sources_available || []).join(' + ') || 'no source reachable'}
+                    {Object.entries(telemetry.source_health?.sources || {})
+                      .filter(([, v]) => !v.available)
+                      .map(([k]) => ` · ${k} unavailable`).join('')}
+                  </span>
                 </h2>
               </div>
               <span className="text-[10px] px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 font-mono">
@@ -735,7 +858,7 @@ export default function App() {
                         </span>
                       </div>
 
-                      {/* 4 Pillar Signals Icons */}
+                      {/* Source badges */}
                       <div className="flex flex-wrap gap-1.5 mb-2 text-[10px]">
                         {t.signals?.sec && (
                           <span className="px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-300 border border-blue-500/20 inline-flex items-center space-x-1" title={t.signals.sec.details}>
@@ -747,12 +870,6 @@ export default function App() {
                           <span className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 inline-flex items-center space-x-1" title={t.signals.etoro.details}>
                             <Users className="w-3 h-3 text-emerald-400" />
                             <span>eToro Copy</span>
-                          </span>
-                        )}
-                        {t.signals?.dub && (
-                          <span className="px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-300 border border-purple-500/20 inline-flex items-center space-x-1" title={t.signals.dub.details}>
-                            <SmartPhone className="w-3 h-3 text-purple-400" />
-                            <span>Dub/Public</span>
                           </span>
                         )}
                         {t.signals?.stocktwits && (
@@ -964,7 +1081,7 @@ export default function App() {
             {/* Capital Budget Utilization Bar */}
             <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-2.5 mb-3 text-xs font-mono">
               <div className="flex justify-between text-[11px] text-slate-400 mb-1">
-                <span>Budget Exposure: <strong className="text-cyan-300">${(telemetry.budget?.total_position_exposure || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong> / ${(telemetry.budget?.allocated_capital || 10000).toLocaleString()}</span>
+                <span>Hard-cap committed: <strong className="text-cyan-300">${(telemetry.budget?.committed_capital || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong> / ${hardCap.toLocaleString()}</span>
                 <span className="text-emerald-400 font-bold">${(telemetry.budget?.remaining_budget || 10000).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} Avail</span>
               </div>
               <div className="w-full h-1.5 bg-slate-950 rounded-full overflow-hidden flex">
@@ -987,10 +1104,19 @@ export default function App() {
                   const pnl = pos.unrealized_pl || 0;
                   const pnlColor = pnl >= 0 ? 'text-emerald-400' : 'text-rose-400';
                   
-                  // Real-time model probabilities (0-100)
-                  const buyPct = Math.min(100, Math.max(0, Math.round((pos.buy_prob !== undefined ? pos.buy_prob : (pos.laya_pos || 0.65)) * 100)));
-                  const sellPct = Math.min(100, Math.max(0, Math.round((pos.sell_prob !== undefined ? pos.sell_prob : (pos.laya_neg || 0.15)) * 100)));
-                  const closePct = Math.min(100, Math.max(0, Math.round((pos.close_prob !== undefined ? pos.close_prob : 0.08) * 100)));
+                  // Real-time model probabilities (Normalized 100% distribution across 4 actions)
+                  const rawBP = pos.buy_prob !== undefined ? pos.buy_prob : 0.15;
+                  const rawHP = pos.hold_prob !== undefined ? pos.hold_prob : 0.70;
+                  const rawSP = pos.sell_prob !== undefined ? pos.sell_prob : 0.10;
+                  const rawCP = pos.close_prob !== undefined ? pos.close_prob : 0.05;
+                  const sumP = (rawBP + rawHP + rawSP + rawCP) || 1.0;
+                  // CLOSE reads 100% only when the backend has fired the exit (close_prob = 1);
+                  // the rounding residue goes to the largest of BUY/HOLD/SELL, never to CLOSE.
+                  const closePct = rawCP >= 1 ? 100 : Math.min(99, Math.round((rawCP / sumP) * 100));
+                  const pcts = [rawBP, rawHP, rawSP].map((p) => Math.round((p / sumP) * 100));
+                  const topIdx = pcts.indexOf(Math.max(...pcts));
+                  pcts[topIdx] = Math.max(0, pcts[topIdx] + 100 - closePct - (pcts[0] + pcts[1] + pcts[2]));
+                  const [buyPct, holdPct, sellPct] = pcts;
 
                   return (
                     <div key={pos.symbol} className="bg-slate-900 border border-slate-800 rounded-xl p-3.5 flex flex-col space-y-3 shadow-md">
@@ -1006,6 +1132,14 @@ export default function App() {
                           </span>
                           <span className="text-[9px] px-1.5 py-0.2 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded font-sans font-semibold">
                             DEDICATED SENTINEL
+                          </span>
+                          <span className={`text-[9px] px-1.5 py-0.2 rounded font-sans font-semibold border ${
+                            pos.action === 'BUY' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' :
+                            pos.action === 'CLOSE' ? 'bg-rose-500/10 text-rose-400 border-rose-500/20' :
+                            pos.action === 'SELL' ? 'bg-amber-500/10 text-amber-400 border-amber-500/20' :
+                            'bg-cyan-500/10 text-cyan-400 border-cyan-500/20'
+                          }`}>
+                            ACTION: {pos.action || 'HOLD'}
                           </span>
                         </div>
                         <div className="flex items-center space-x-2 text-[10px] text-slate-400">
@@ -1040,6 +1174,14 @@ export default function App() {
                           </div>
                           <div className="text-[11px] text-slate-400 mt-1 font-mono">
                             Avg: ${pos.avg_entry_price?.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: (pos.avg_entry_price < 1 ? 6 : 2) })} → Now: <strong className="text-cyan-300 font-bold">${pos.current_price?.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: (pos.current_price < 1 ? 6 : 2) })}</strong>
+                            {pos.price_age_s >= 60 && (
+                              <span
+                                className="ml-2 text-[9px] px-1.5 py-0.5 rounded font-sans font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                                title="The engine is watching this position every second; the market has printed no new price. Probabilities only move when price or news does."
+                              >
+                                no new price {pos.price_age_s >= 3600 ? `${(pos.price_age_s / 3600).toFixed(1)}h` : `${Math.floor(pos.price_age_s / 60)}m`}
+                              </span>
+                            )}
                           </div>
                           {pos.stop_loss && (
                             <div className="text-[10px] text-slate-400 mt-0.5 font-mono flex items-center space-x-2">
@@ -1070,25 +1212,33 @@ export default function App() {
                         </div>
                       </div>
 
-                      {/* Three Bars: BUY, SELL, CLOSE Real-time Probabilities out of 100 */}
+                      {/* Four Bars: BUY, HOLD, SELL, CLOSE Real-time Probabilities summing to 100% */}
                       <div className="pt-2 border-t border-slate-800/80">
                         <div className="text-[10px] text-slate-400 mb-1.5 flex items-center justify-between font-sans">
                           <span className="flex items-center space-x-1.5 font-semibold text-slate-300">
                             <BrainCircuit className="w-3.5 h-3.5 text-cyan-400 animate-pulse" />
-                            <span>Laya Model Thinking & Signal Matrix</span>
+                            <span>Action Policy Distribution</span>
                           </span>
-                          <span className="text-[9px] text-slate-500 font-mono">Real-time / 100</span>
+                          <span className="text-[9px] text-slate-500 font-mono">100% Normalized [BUY, HOLD, SELL, CLOSE]</span>
                         </div>
 
-                        <div className="grid grid-cols-3 gap-2 text-[10px] font-mono">
+                        {/* 100% Unified Composite Distribution Bar */}
+                        <div className="w-full h-1.5 bg-slate-950 rounded-full overflow-hidden flex mb-2 border border-slate-800/60">
+                          <div style={{ width: `${buyPct}%` }} className="h-full bg-emerald-400 transition-all duration-300" title={`BUY: ${buyPct}%`} />
+                          <div style={{ width: `${holdPct}%` }} className="h-full bg-cyan-400 transition-all duration-300" title={`HOLD: ${holdPct}%`} />
+                          <div style={{ width: `${sellPct}%` }} className="h-full bg-amber-400 transition-all duration-300" title={`SELL: ${sellPct}%`} />
+                          <div style={{ width: `${closePct}%` }} className="h-full bg-rose-400 transition-all duration-300" title={`CLOSE: ${closePct}%`} />
+                        </div>
+
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px] font-mono">
                           {/* BUY Probability Bar */}
-                          <div className="bg-slate-950/70 border border-slate-800/80 rounded-lg p-2 flex flex-col justify-between">
+                          <div className={`bg-slate-950/70 border ${pos.action === 'BUY' ? 'border-emerald-500/50 ring-1 ring-emerald-500/30' : 'border-slate-800/80'} rounded-lg p-2 flex flex-col justify-between`}>
                             <div className="flex justify-between items-center mb-1.5">
                               <span className="text-emerald-400 font-bold flex items-center space-x-1">
                                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
                                 <span>BUY</span>
                               </span>
-                              <span className="font-bold text-slate-200">{buyPct} <span className="text-slate-500 text-[9px]">/ 100</span></span>
+                              <span className="font-bold text-slate-200">{buyPct}%</span>
                             </div>
                             <div className="w-full h-1.5 bg-slate-800/80 rounded-full overflow-hidden">
                               <div 
@@ -1096,17 +1246,35 @@ export default function App() {
                                 className="h-full bg-emerald-400 transition-all duration-300 rounded-full shadow-[0_0_8px_rgba(52,211,153,0.5)]"
                               />
                             </div>
-                            <span className="text-[9px] text-slate-500 mt-1 font-sans">Momentum Buy</span>
+                            <span className="text-[9px] text-slate-500 mt-1 font-sans">Momentum Add</span>
+                          </div>
+
+                          {/* HOLD Probability Bar */}
+                          <div className={`bg-slate-950/70 border ${pos.action === 'HOLD' ? 'border-cyan-500/50 ring-1 ring-cyan-500/30' : 'border-slate-800/80'} rounded-lg p-2 flex flex-col justify-between`}>
+                            <div className="flex justify-between items-center mb-1.5">
+                              <span className="text-cyan-400 font-bold flex items-center space-x-1">
+                                <span className="w-1.5 h-1.5 rounded-full bg-cyan-400"></span>
+                                <span>HOLD</span>
+                              </span>
+                              <span className="font-bold text-slate-200">{holdPct}%</span>
+                            </div>
+                            <div className="w-full h-1.5 bg-slate-800/80 rounded-full overflow-hidden">
+                              <div 
+                                style={{ width: `${holdPct}%` }}
+                                className="h-full bg-cyan-400 transition-all duration-300 rounded-full shadow-[0_0_8px_rgba(34,211,238,0.5)]"
+                              />
+                            </div>
+                            <span className="text-[9px] text-slate-500 mt-1 font-sans">Maintain Position</span>
                           </div>
 
                           {/* SELL Probability Bar */}
-                          <div className="bg-slate-950/70 border border-slate-800/80 rounded-lg p-2 flex flex-col justify-between">
+                          <div className={`bg-slate-950/70 border ${pos.action === 'SELL' ? 'border-amber-500/50 ring-1 ring-amber-500/30' : 'border-slate-800/80'} rounded-lg p-2 flex flex-col justify-between`}>
                             <div className="flex justify-between items-center mb-1.5">
                               <span className="text-amber-400 font-bold flex items-center space-x-1">
                                 <span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
                                 <span>SELL</span>
                               </span>
-                              <span className="font-bold text-slate-200">{sellPct} <span className="text-slate-500 text-[9px]">/ 100</span></span>
+                              <span className="font-bold text-slate-200">{sellPct}%</span>
                             </div>
                             <div className="w-full h-1.5 bg-slate-800/80 rounded-full overflow-hidden">
                               <div 
@@ -1114,17 +1282,17 @@ export default function App() {
                                 className="h-full bg-amber-400 transition-all duration-300 rounded-full shadow-[0_0_8px_rgba(251,191,36,0.5)]"
                               />
                             </div>
-                            <span className="text-[9px] text-slate-500 mt-1 font-sans">Bearish Fading</span>
+                            <span className="text-[9px] text-slate-500 mt-1 font-sans">Scale-Out / Trim</span>
                           </div>
 
                           {/* CLOSE Probability Bar */}
-                          <div className="bg-slate-950/70 border border-slate-800/80 rounded-lg p-2 flex flex-col justify-between">
+                          <div className={`bg-slate-950/70 border ${pos.action === 'CLOSE' ? 'border-rose-500/50 ring-1 ring-rose-500/30' : 'border-slate-800/80'} rounded-lg p-2 flex flex-col justify-between`}>
                             <div className="flex justify-between items-center mb-1.5">
                               <span className="text-rose-400 font-bold flex items-center space-x-1">
                                 <span className="w-1.5 h-1.5 rounded-full bg-rose-400"></span>
                                 <span>CLOSE</span>
                               </span>
-                              <span className="font-bold text-slate-200">{closePct} <span className="text-slate-500 text-[9px]">/ 100</span></span>
+                              <span className="font-bold text-slate-200">{closePct}%</span>
                             </div>
                             <div className="w-full h-1.5 bg-slate-800/80 rounded-full overflow-hidden">
                               <div 
@@ -1132,27 +1300,27 @@ export default function App() {
                                 className="h-full bg-rose-400 transition-all duration-300 rounded-full shadow-[0_0_8px_rgba(244,63,94,0.5)]"
                               />
                             </div>
-                            <span className="text-[9px] text-slate-500 mt-1 font-sans">SL / TP Exit</span>
+                            <span className="text-[9px] text-slate-500 mt-1 font-sans">Full Exit (SL/TP)</span>
                           </div>
                         </div>
                       </div>
 
-                      {/* Bot Sizing Intelligence: BUY Investment Sizing & SELL Divestment Strategy */}
+                      {/* Bot Sizing Intelligence: HOLD Position Sizing & SELL Divestment Strategy */}
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[10px] font-mono">
-                        {/* BUY Sizing */}
-                        <div className="bg-slate-950/70 border border-emerald-900/40 rounded-lg p-2 flex flex-col justify-between">
+                        {/* HOLD Sizing */}
+                        <div className="bg-slate-950/70 border border-cyan-900/40 rounded-lg p-2 flex flex-col justify-between">
                           <div className="flex items-center justify-between text-slate-400 mb-1">
-                            <span className="text-emerald-400 font-bold flex items-center space-x-1.5">
-                              <DollarSign className="w-3.5 h-3.5 text-emerald-400" />
-                              <span>BUY SIZING</span>
+                            <span className="text-cyan-400 font-bold flex items-center space-x-1.5">
+                              <DollarSign className="w-3.5 h-3.5 text-cyan-400" />
+                              <span>HOLD SIZING</span>
                             </span>
-                            <span className="text-emerald-300 font-bold">
+                            <span className="text-cyan-300 font-bold">
                               ${(pos.invested_dollars || (pos.qty * pos.avg_entry_price) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                             </span>
                           </div>
                           <div className="flex items-center justify-between text-[9px] text-slate-400 border-t border-slate-800/60 pt-1">
                             <span>Budget Allocation:</span>
-                            <span className="text-cyan-300 font-semibold">{pos.allocated_pct || ((pos.invested_dollars / (telemetry.budget?.allocated_capital || 10000)) * 100).toFixed(1)}%</span>
+                            <span className="text-cyan-300 font-semibold">{pos.allocated_pct || ((pos.invested_dollars / Math.max(1, hardCap)) * 100).toFixed(1)}%</span>
                           </div>
                           <div className="flex items-center justify-between text-[9px] text-slate-400 mt-0.5">
                             <span>Risk / Reward:</span>

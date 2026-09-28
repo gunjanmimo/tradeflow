@@ -42,6 +42,16 @@ class RiskProfile:
     # which survives noise better at the cost of a worse reward:risk ratio.
     stop_atr_multiple: float
     take_profit_atr_multiple: float
+    # Diversification (all % of the trading budget). Caps are enforced on every
+    # entry; region targets are not enforceable at entry (we cannot force a buy)
+    # and instead steer discovery toward under-filled sleeves.
+    max_sector_pct: float = 30.0         # any one GICS sector (and "Unclassified")
+    max_crypto_pct: float = 15.0         # all crypto together: one macro bet
+    max_us_pct: float = 60.0
+    max_intl_region_pct: float = 20.0    # Europe/UK, and Asia, each
+    intl_region_target_pct: float = 10.0
+    min_defensive_pct: float = 20.0      # health care + staples + utilities
+    max_pair_correlation: float = 0.75   # above this vs a holding, size is halved
 
     @property
     def reward_risk_ratio(self) -> float:
@@ -69,6 +79,24 @@ _TABLE = {
 }
 
 
+# Diversification per level, kept as its own table so the sizing table above stays
+# readable. A cautious dial spreads capital wider and tolerates less overlap.
+# factor: (max sector%, max crypto%, max US%, max Europe/Asia%, Europe/Asia target%,
+#          min defensive%, max pair correlation)
+_DIVERSIFICATION = {
+    1:  (20.0,  5.0, 50.0, 20.0, 15.0, 30.0, 0.60),
+    2:  (22.0,  6.0, 55.0, 20.0, 15.0, 28.0, 0.65),
+    3:  (25.0, 10.0, 55.0, 20.0, 12.0, 25.0, 0.70),
+    4:  (30.0, 15.0, 60.0, 20.0, 10.0, 20.0, 0.75),
+    5:  (32.0, 18.0, 65.0, 22.0, 10.0, 18.0, 0.78),
+    6:  (35.0, 21.0, 70.0, 25.0,  8.0, 15.0, 0.80),
+    7:  (38.0, 24.0, 75.0, 28.0,  8.0, 12.0, 0.82),
+    8:  (40.0, 27.0, 80.0, 30.0,  5.0, 10.0, 0.85),
+    9:  (45.0, 30.0, 85.0, 35.0,  5.0,  5.0, 0.88),
+    10: (50.0, 35.0, 90.0, 40.0,  0.0,  0.0, 0.90),
+}
+
+
 def clamp_factor(factor: Any) -> int:
     """Coerces any input to a valid integer level. Invalid input falls back to default."""
     try:
@@ -82,7 +110,15 @@ def get_profile(factor: Any = DEFAULT_RISK_FACTOR) -> RiskProfile:
     f = clamp_factor(factor)
     (label, rpt, notional, maxpos, perclass, daily, dd, minbuy, minsent,
      stop_x, tp_x) = _TABLE[f]
+    sector, crypto, us, intl, intl_target, defensive, corr = _DIVERSIFICATION[f]
     return RiskProfile(
+        max_sector_pct=sector,
+        max_crypto_pct=crypto,
+        max_us_pct=us,
+        max_intl_region_pct=intl,
+        intl_region_target_pct=intl_target,
+        min_defensive_pct=defensive,
+        max_pair_correlation=corr,
         factor=f,
         label=label,
         risk_per_trade_pct=rpt,
@@ -109,7 +145,10 @@ def describe_change(old_factor: int, new_factor: int) -> str:
         f"max positions {a.max_concurrent_positions} -> {b.max_concurrent_positions}, "
         f"daily-loss halt {a.max_daily_loss_pct}% -> {b.max_daily_loss_pct}%, "
         f"entry bar {a.min_buy_prob} -> {b.min_buy_prob}, "
-        f"R:R {a.reward_risk_ratio} -> {b.reward_risk_ratio}."
+        f"R:R {a.reward_risk_ratio} -> {b.reward_risk_ratio}, "
+        f"sector cap {a.max_sector_pct}% -> {b.max_sector_pct}%, "
+        f"crypto cap {a.max_crypto_pct}% -> {b.max_crypto_pct}%, "
+        f"min defensive {a.min_defensive_pct}% -> {b.min_defensive_pct}%."
     )
 
 

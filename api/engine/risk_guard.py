@@ -15,6 +15,32 @@ class RiskGuard:
         if not state.is_trading_active:
             return False, "Trading engine is currently paused by kill-switch."
 
+        # 1a. Markets / symbols switched off from the UI. Entries only.
+        from core.market_filter import market_filter
+        market_block = market_filter.entry_block_reason(symbol)
+        if market_block:
+            return False, market_block
+
+        # 1a'. Stock session. A market order sent outside regular hours used to be
+        # queued by the broker and filled at the open at whatever price printed.
+        from core.state import is_crypto_symbol
+        if not is_crypto_symbol(symbol):
+            from core.market_hours import us_session, REGULAR, PRE
+            session = us_session()
+            if session == PRE and not settings.PREMARKET_TRADING_ENABLED:
+                return False, "US pre-market: pre-market trading is switched off (PREMARKET_TRADING_ENABLED)."
+            if session not in (REGULAR, PRE):
+                return False, f"US stock market is {session}. Stock entries run 04:00-16:00 NY on trading days."
+            # Day trading: nothing is held through the close, so a stock opened
+            # shortly before it would only be flattened again straight away.
+            if settings.DAY_TRADE_FLATTEN_ENABLED:
+                from core.market_hours import minutes_to_close
+                mins = minutes_to_close(symbol)
+                if mins is not None and mins <= settings.NO_NEW_ENTRY_MINUTES_BEFORE_CLOSE:
+                    return False, (f"{symbol}: the US market closes in {max(mins, 0.0):.0f} min "
+                                   f"(no new day trades inside {settings.NO_NEW_ENTRY_MINUTES_BEFORE_CLOSE:.0f} min "
+                                   f"of the close).")
+
         # 1b. Portfolio circuit breakers.
         # These gate NEW ENTRIES ONLY -- exits must always remain possible, or a
         # tripped breaker would trap the very positions that tripped it.
@@ -36,7 +62,7 @@ class RiskGuard:
             return False, reason
 
         if state.drawdown_pct >= profile.max_drawdown_pct:
-            reason = (f"Max drawdown breached: -{state.drawdown_pct:.2f}% from peak equity "
+            reason = (f"Max drawdown breached: -{state.drawdown_pct:.2f}% from peak bot equity "
                       f"${state.peak_equity:,.2f} (limit {profile.max_drawdown_pct}% at risk dial {profile.factor}). "
                       f"No new entries until manually reset.")
             if state.halt_reason != reason:
@@ -55,6 +81,15 @@ class RiskGuard:
             klass = "crypto" if is_crypto_symbol(symbol) else "equity"
             return False, (f"Correlated exposure cap reached: already holding {same_class} "
                            f"{klass} positions (limit {profile.max_positions_per_asset_class} at risk dial {profile.factor}).")
+
+        # 1d. Diversification: sector / region / crypto / cyclical-share caps from
+        # the same dial. The class count above cannot see that NVDA and MSFT are
+        # one bet; this can.
+        from engine.diversification import diversification
+        div_block = diversification.entry_block_reason(
+            symbol, 15.0 if is_crypto_symbol(symbol) else 30.0)
+        if div_block:
+            return False, div_block
 
         # 2. Duplicate or in-flight position check
         if symbol in state.active_positions:
@@ -76,19 +111,24 @@ class RiskGuard:
         if len(state.active_positions) >= profile.max_concurrent_positions:
             return False, f"Max concurrent positions limit ({profile.max_concurrent_positions} at risk dial {profile.factor}) reached."
 
-        # 4. Allocated Capital Budget check (Do not allow using entire account equity)
-        if state.total_position_exposure >= state.allocated_capital:
-            return False, f"Allocated budget limit (${state.allocated_capital:,.2f}) reached. Current exposure: ${state.total_position_exposure:,.2f}."
+        # 4. Hard budget cap. Committed = cost basis of open positions + buys in
+        # flight; the cap shrinks with realised losses. Nothing outside it is used.
+        min_order = 15.0 if is_crypto_symbol(symbol) else 30.0
+        if state.hard_cap < min_order:
+            return False, (f"Budget exhausted: realised losses have reduced the bots' capital to "
+                           f"${state.bot_capital:,.2f} of the ${state.allocated_capital:,.2f} cap. "
+                           f"No money outside the budget is used; raise or reset the budget to continue.")
+        if state.remaining_budget < min_order:
+            return False, (f"Hard budget cap reached: ${state.committed_capital:,.2f} committed of "
+                           f"${state.hard_cap:,.2f} (${state.remaining_budget:,.2f} left).")
 
-        if state.remaining_budget < 30.0:
-            return False, f"Remaining capital budget too low (${state.remaining_budget:,.2f} left of ${state.allocated_capital:,.2f})."
-
-        # 5. Cash check
+        # 5. Strict Cash & Budget Cap Check: bot can NEVER touch locked broker cash or funds outside budget
         from core.state import is_crypto_symbol
-        cash = state.account_info.get("cash", 0.0)
-        min_cash_required = 30.0 if is_crypto_symbol(symbol) else 100.0
-        if cash < min_cash_required:
-            return False, f"Insufficient available cash (${cash:,.2f} available, minimum ${min_cash_required:,.2f} required)."
+        bot_cash = state.bot_cash
+        min_cash_required = min_order
+        if bot_cash < min_cash_required:
+            return False, (f"Insufficient bot cash under hard cap (${bot_cash:,.2f} available, "
+                           f"minimum ${min_cash_required:,.2f} required). Main broker equity is locked outside the budget.")
 
         return True, "Passed risk filters."
 

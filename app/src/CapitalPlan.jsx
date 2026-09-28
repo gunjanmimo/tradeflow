@@ -126,12 +126,11 @@ export function CapitalPlanPanel({ plan, apiBase, cash, onDone }) {
         <p className="text-xs text-slate-400 leading-relaxed">
           <b className="text-slate-200">Stair</b> trades only part of your deposit and keeps the rest as a reserve it never touches.
           Each time the trading capital reaches its target on <i>closed</i> trades, part of that step's profit is banked as income
-          and the rest keeps compounding. It does <b className="text-slate-200">not</b> take more risk to reach a target: strategies,
-          stops and the risk dial stay the same. Banked income and the reserve stay as cash at the broker; withdraw them there.
+          and the rest keeps compounding. <b className="text-amber-300">Main broker equity outside your deposit is locked and untouched.</b> Banked income and the reserve stay as cash at the broker.
         </p>
       ) : (
         <p className="text-xs text-slate-400 leading-relaxed">
-          <b className="text-slate-200">Classic</b> trades your fixed budget and leaves profit in it.
+          <b className="text-slate-200">Classic</b> trades only your fixed budget cap. <b className="text-amber-300">Main broker equity outside the budget cap is locked and untouched.</b> Profit stays in broker cash and never increases the hard cap.
           {running && ' Switching stops the stair ladder; banked income stays recorded and the previous budget is restored.'}
         </p>
       )}

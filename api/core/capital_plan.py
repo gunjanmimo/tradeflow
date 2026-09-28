@@ -1,8 +1,10 @@
 """
 Capital plan: "classic" vs "stair" money management.
 
-Classic: the bots trade against a fixed budget (state.allocated_capital), and
-profit is simply left in the budget.
+Classic: the bots trade against a fixed budget (state.allocated_capital). The
+budget is a HARD cap: realised losses shrink what the bots may deploy
+(cap + realised PnL since the cap was set), and realised profit never raises it
+above the cap -- profit is left as cash the engine does not trade.
 
 Stair (a profit ratchet):
   1. Split the deposit: deploy_pct goes to trading, the rest is a RESERVE that
@@ -72,9 +74,11 @@ class CapitalPlan:
     stage_started_at: float = 0.0
     realized_in_stage: float = 0.0
     banked_income: float = 0.0          # never traded
+    harvested_income: float = 0.0       # profit-harvest day income, cumulative; never traded
     halted: bool = False
     ladder: int = 0                     # increments each time a ladder is (re)started
-    classic_budget: float = 10000.0     # restored when stair mode is switched off
+    classic_budget: float = 10000.0     # the classic cap; also restored when stair is switched off
+    classic_realized: float = 0.0       # classic: realised PnL since the cap was last set
     history: List[Dict[str, Any]] = field(default_factory=list)
 
     # ---- derived ----
@@ -98,7 +102,8 @@ class CapitalPlan:
         d = asdict(self)
         d.update(trading_capital=self.trading_capital, target=self.target,
                  progress=self.progress,
-                 total_value=round(self.trading_capital + self.reserve + self.banked_income, 2))
+                 total_value=round(self.trading_capital + self.reserve + self.banked_income
+                                   + self.harvested_income, 2))
         return d
 
 
@@ -127,6 +132,8 @@ class CapitalPlanManager:
             logger.error(f"Could not load capital plan ({e}); starting in classic mode")
             self.plan = CapitalPlan()
         self._apply_budget()
+        from core.state import state
+        state.sync_locked_equity()
 
     def _save(self):
         try:
@@ -143,6 +150,23 @@ class CapitalPlanManager:
         from core.state import state
         if self.plan.mode == "stair":
             state.allocated_capital = max(self.plan.trading_capital, 0.0)
+        else:
+            state.allocated_capital = self.plan.classic_budget
+
+    @property
+    def budget_realized(self) -> float:
+        """Realised PnL not already folded into allocated_capital (stair folds its own)."""
+        return self.plan.classic_realized if self.plan.mode == "classic" else 0.0
+
+    def set_classic_budget(self, amount: float):
+        """Sets a new classic cap. The loss/profit ledger restarts from the new cap."""
+        self.plan.classic_budget = round(float(amount), 2)
+        self.plan.classic_realized = 0.0
+        self._apply_budget()
+        from core.state import state
+        state.reset_peak_equity()
+        state.sync_locked_equity(self.plan.classic_budget)
+        self._save()
 
     # ---- mode switches ----
     def enable_stair(self, deposit: float, deploy_pct: float = 0.5,
@@ -169,6 +193,10 @@ class CapitalPlanManager:
         cash = float(state.account_info.get("cash", 0.0))
         if deposit > cash + 1e-6:
             raise ValueError(f"Deposit ${deposit:,.2f} exceeds available broker cash ${cash:,.2f}")
+        if stage_capital + 1e-6 < state.committed_capital:
+            raise ValueError(
+                f"Trading capital ${stage_capital:,.2f} is below the ${state.committed_capital:,.2f} "
+                "already committed to open or pending bot positions. Close positions or use a larger deposit first.")
 
         classic = state.allocated_capital if self.plan.mode == "classic" else self.plan.classic_budget
         now = time.time()
@@ -184,6 +212,8 @@ class CapitalPlanManager:
             classic_budget=classic,
         )
         self._apply_budget()
+        state.reset_peak_equity()
+        state.sync_locked_equity(self.plan.deposit)
         self._save()
         warn = ""
         if stage_capital < mins["equity"]:
@@ -201,8 +231,11 @@ class CapitalPlanManager:
         summary = (f"Stair mode OFF after stage {self.plan.stage}: banked income "
                    f"${self.plan.banked_income:,.2f}, trading capital ${self.plan.trading_capital:,.2f}, "
                    f"reserve ${self.plan.reserve:,.2f}. Budget restored to classic ${self.plan.classic_budget:,.2f}.")
-        state.allocated_capital = self.plan.classic_budget
         self.plan.mode = "classic"
+        self.plan.classic_realized = 0.0
+        self._apply_budget()
+        state.reset_peak_equity()
+        state.sync_locked_equity(self.plan.classic_budget)
         self._save()
         state.log_event("CAPITAL_PLAN", summary)
         return self.plan.to_dict()
@@ -212,6 +245,8 @@ class CapitalPlanManager:
         """Called for every closed trade. O(1); runs on the close path, not the tick path."""
         p = self.plan
         if p.mode != "stair":
+            p.classic_realized = round(p.classic_realized + float(pnl), 2)
+            self._save()
             return
         from core.state import state
         p.realized_in_stage = round(p.realized_in_stage + float(pnl), 2)
@@ -247,6 +282,15 @@ class CapitalPlanManager:
                 f"place an order. New entries stopped. Reserve ${p.reserve:,.2f} and banked income "
                 f"${p.banked_income:,.2f} are untouched; restart the ladder to continue.")
         self._apply_budget()
+        self._save()
+
+    def on_harvest(self, symbol: str, pnl: float):
+        """
+        Profit-harvest income. Deliberately NOT added to classic_realized or
+        realized_in_stage: it must neither raise the budget, compound into a
+        stage, nor offset a later loss. It stays as untraded broker cash.
+        """
+        self.plan.harvested_income = round(self.plan.harvested_income + float(pnl), 2)
         self._save()
 
     def entry_block_reason(self) -> Optional[str]:

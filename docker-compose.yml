@@ -2,7 +2,10 @@ services:
   hydradb:
     # Agent memory layer: object-store-native graph DB, OpenCypher over Bolt + HTTP.
     # Self-hosted so trade history and agent memory never leave this machine.
+    # Off for now: only starts with `--profile memory`. To turn it back on:
+    #   MEMORY_ENABLED=true docker compose --profile memory up -d
     image: ghcr.io/hydra-db/hydradb:latest
+    profiles: ["memory"]
     container_name: tradeflow-hydradb
     user: "1000:1000"
     ports:
@@ -37,6 +40,7 @@ services:
     env_file:
       - ./api/.env
     environment:
+      MEMORY_ENABLED: "${MEMORY_ENABLED:-false}"
       HYDRA_HTTP_URL: http://hydradb:8443
       HYDRA_GRAPH_ID: default
       HYDRA_NAMESPACE: default
@@ -49,8 +53,6 @@ services:
       - hf-cache:/root/.cache/huggingface
       # read-only: the backend needs the token, not write access to the graph store
       - ./hydradb-data/auth-token:/hydra/auth-token:ro
-    depends_on:
-      - hydradb
     restart: unless-stopped
     networks:
       - tradeflow-net

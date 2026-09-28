@@ -18,7 +18,7 @@ import time
 
 from core.config import settings
 from core.state import state, TradeDecision, QuantMetrics, SentimentRecord
-from engine import brackets
+from engine import brackets, action_policy
 from engine.strategies import registry
 from engine.strategies.context import build_context
 
@@ -121,13 +121,24 @@ class DecisionEngine:
             elif price > avg_price and tp > avg_price:
                 close_prob = max(close_prob,
                                  min(max((price - avg_price) / (tp - avg_price), 0.0), 1.0))
-        if should_close:
-            close_prob = 1.0
-        close_prob = round(float(min(max(close_prob, 0.0), 1.0)), 4)
+        close_prob = float(min(max(close_prob, 0.0), 1.0))
+        should_close = should_close or close_prob >= 1.0
 
-        # Telemetry the UI reads off the position record
-        pos["buy_prob"] = 0.0
-        pos["sell_prob"] = exit_decision.sell_prob
+        # Telemetry the UI reads off the position record (100% across 4 actions;
+        # CLOSE is 100% only when the exit fires).
+        sell_w = float(exit_decision.sell_prob)
+        probs, action = action_policy.distribute(
+            buy_w=float(ctx.sentiment.pos_prob) * 0.45,
+            hold_w=max(0.2, 1.0 - max(close_prob, sell_w)),
+            sell_w=sell_w, close_p=close_prob, closing=should_close)
+        buy_prob, hold_prob = probs["BUY"], probs["HOLD"]
+        sell_prob, close_prob = probs["SELL"], probs["CLOSE"]
+
+        pos["action_space"] = list(action_policy.ACTION_SPACE)
+        pos["action"] = action
+        pos["buy_prob"] = buy_prob
+        pos["hold_prob"] = hold_prob
+        pos["sell_prob"] = sell_prob
         pos["close_prob"] = close_prob
         pos["laya_pos"] = ctx.sentiment.pos_prob
         pos["laya_neg"] = ctx.sentiment.neg_prob
@@ -142,9 +153,10 @@ class DecisionEngine:
 
         return TradeDecision(
             symbol=symbol,
-            action="CLOSE" if should_close else "HOLD",
-            buy_prob=0.0,
-            sell_prob=exit_decision.sell_prob,
+            action=action,
+            buy_prob=buy_prob,
+            hold_prob=hold_prob,
+            sell_prob=sell_prob,
             close_prob=close_prob,
             close=should_close,
             reason=f"[{strategy.name}] {reason}",

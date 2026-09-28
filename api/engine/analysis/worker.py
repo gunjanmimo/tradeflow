@@ -78,7 +78,10 @@ def engle_granger(pa: np.ndarray, pb: np.ndarray) -> Optional[Dict[str, float]]:
     sd = float(e.std())
     if sd <= 0:
         return None
-    rc = np.corrcoef(np.diff(y), np.diff(x))[0, 1]
+    # A leg whose returns never vary (a quiet symbol, forward-filled) has zero
+    # std: corrcoef returns NaN, handled below, so silence numpy's warning.
+    with np.errstate(invalid="ignore", divide="ignore"):
+        rc = np.corrcoef(np.diff(y), np.diff(x))[0, 1]
     return {"alpha": alpha, "beta": beta, "mean": float(e.mean()), "std": sd,
             "return_corr": round(float(rc), 3) if np.isfinite(rc) else 0.0,
             "adf_t": round(t, 3), "half_life": round(half_life, 1),
@@ -248,6 +251,14 @@ def open_risk(symbols: Dict[str, Dict]) -> Dict[str, Any]:
 # -----------------------------------------------------------------------------
 
 def run_cycle(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    # Flat price windows are normal (quiet symbols, a fresh backfill) and every
+    # statistic here already treats a NaN/inf result as "no reading". Numpy's
+    # divide warnings for them only flooded the container log once a second.
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return _run_cycle(snapshot)
+
+
+def _run_cycle(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     t_start = time.perf_counter()
     from core.state import state, PriceTick
     from engine.strategies import performance, regime as regime_mod
