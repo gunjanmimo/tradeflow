@@ -60,31 +60,6 @@ export function DailyPnlChip({ dailyPnl, onClick }) {
   );
 }
 
-// Profit set aside today by the harvest: half of every winning trade's profit,
-// banked as day income. It is never traded again and never absorbs a loss.
-export function IncomeChip({ dailyPnl, onClick }) {
-  const income = Number(dailyPnl?.harvested_income || 0);
-  const count = Number(dailyPnl?.harvests || 0);
-  return (
-    <button
-      onClick={onClick}
-      className="group flex items-center gap-2 rounded-xl px-3 py-1.5 bg-emerald-400/[0.04] ring-1 ring-emerald-400/25 hover:ring-emerald-400/60 hover:bg-emerald-400/10 transition-all text-left"
-      title={`Income banked today: half of each trade's profit, sold as soon as it is in profit (${count} harvest${count === 1 ? '' : 's'}). Set aside, never traded again.`}
-    >
-      <span className="w-4 h-4 flex items-center justify-center text-emerald-400 font-bold text-sm leading-none">$</span>
-      <div className="flex flex-col min-w-[64px]">
-        <span className="text-[10px] uppercase tracking-wider text-slate-500 leading-none">
-          Income today
-        </span>
-        <span className="text-sm font-mono font-semibold leading-tight text-emerald-300">
-          ${income.toFixed(2)}
-          <span className="text-[10px] text-slate-500 font-sans font-normal ml-1">×{count}</span>
-        </span>
-      </div>
-    </button>
-  );
-}
-
 export function DailyPnlCalculatorModal({ isOpen, onClose, telemetry, apiBase }) {
   const [tab, setTab] = useState('overview'); // 'overview' | 'calculator' | 'history'
   const [historyData, setHistoryData] = useState([]);

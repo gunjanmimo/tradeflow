@@ -3,7 +3,8 @@ import { LatencyChip, LatencyPanel, QuantDeskCard } from './QuantPanels';
 import { CapitalModeChip, CapitalPlanPanel } from './CapitalPlan';
 import { DiscoveryChip, DiscoveryPanel } from './DiscoveryPanel';
 import { ManagerChip, ManagerPanel } from './ManagerPanel';
-import { DailyPnlChip, DailyPnlCalculatorModal, IncomeChip } from './DailyPnlCalculator';
+import { DailyPnlChip, DailyPnlCalculatorModal } from './DailyPnlCalculator';
+import { RLChip, RLPanel } from './RLPanel';
 import { MarketsModal } from './MarketsModal';
 import { HugeiconsIcon } from '@hugeicons/react';
 import { 
@@ -103,8 +104,9 @@ function Modal({ title, icon, onClose, children, wide = false, xl = false }) {
   );
 }
 
-const API_BASE = "http://localhost:8000";
-const WS_URL = "ws://localhost:8000/ws";
+// Override with VITE_API_BASE (e.g. http://localhost:8001) to point the dashboard at another backend.
+const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+const WS_URL = API_BASE.replace(/^http/, "ws") + "/ws";
 
 export default function App() {
   const [connected, setConnected] = useState(false);
@@ -160,6 +162,7 @@ export default function App() {
   const [isCapitalOpen, setIsCapitalOpen] = useState(false);
   const [isDiscoveryOpen, setIsDiscoveryOpen] = useState(false);
   const [isManagerOpen, setIsManagerOpen] = useState(false);
+  const [isRLOpen, setIsRLOpen] = useState(false);
   const [isPnlCalcOpen, setIsPnlCalcOpen] = useState(false);
   const [isMarketsOpen, setIsMarketsOpen] = useState(false);
   const [clientLatency, setClientLatency] = useState({ rttMs: null, rttP95: null, frameMs: null, ageMs: null });
@@ -398,13 +401,13 @@ export default function App() {
       <header className="sticky top-0 z-50 border-b border-white/5 bg-[#0b111c]/80 backdrop-blur-xl">
         <div className="px-6 h-16 flex items-center justify-between gap-4">
           {/* Brand */}
-          <div className="flex items-center gap-3 min-w-0">
+          <div className="flex items-center gap-3 shrink-0">
             <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-emerald-500 to-cyan-500 flex items-center justify-center shadow-lg shadow-emerald-500/20 shrink-0">
               <Zap className="w-5 h-5 text-slate-950 fill-current" />
             </div>
             <div className="min-w-0">
               <h1 className="font-semibold text-lg leading-tight tracking-tight text-white">TradeFlow</h1>
-              <p className="hidden md:block text-[11px] text-slate-500 truncate">{['Own stock score', ...(telemetry.source_health?.real_sources_available || []), 'Laya news', 'Alpaca Paper'].join(' · ')}</p>
+              <p className="hidden md:block text-[11px] text-slate-500 truncate">{['US stocks', 'RL policy (PPO)', ...(telemetry.source_health?.real_sources_available || []), 'Alpaca Paper'].join(' · ')}</p>
             </div>
           </div>
 
@@ -415,7 +418,7 @@ export default function App() {
             const stocksOn = telemetry.markets?.markets?.stocks !== false;
             return (
               <div
-                className="hidden lg:flex items-center rounded-full bg-white/[0.03] ring-1 ring-white/10 text-xs font-medium"
+                className="hidden min-[2100px]:flex items-center rounded-full bg-white/[0.03] ring-1 ring-white/10 text-xs font-medium"
                 title={stocksLive ? `Stock markets open: ${venues}` : `Stock markets closed · next US open: ${clock.next_us_open || '09:30 AM EST'}`}
               >
                 <button type="button" onClick={() => setIsMarketsOpen(true)} className="flex items-center gap-2 pl-3 pr-3 py-1.5 rounded-full hover:bg-white/[0.05] transition-colors">
@@ -433,7 +436,7 @@ export default function App() {
           {/* Right cluster: stat chips + actions */}
           <div className="flex items-center gap-2">
             {/* Main Broker Equity (Locked outside bot budget) */}
-            <div className="hidden xl:flex flex-col items-end px-3 py-1 rounded-xl bg-white/[0.02] ring-1 ring-white/5" title="Main broker equity is locked outside bot budget. Bot cannot touch outside the cap.">
+            <div className="hidden min-[2100px]:flex flex-col items-end px-3 py-1 rounded-xl bg-white/[0.02] ring-1 ring-white/5" title="Main broker equity is locked outside bot budget. Bot cannot touch outside the cap.">
               <span className="text-[10px] uppercase tracking-wider text-slate-500 flex items-center gap-1">
                 <Lock className="w-2.5 h-2.5 text-amber-400" />
                 Broker equity
@@ -460,6 +463,9 @@ export default function App() {
 
             {/* Discovery chip -> candidates, diversification and portfolio risk */}
             <DiscoveryChip brief={telemetry.diversification} onClick={() => setIsDiscoveryOpen(true)} />
+
+            {/* RL chip -> the PPO policy: mode, promotion gate, results vs baselines */}
+            <RLChip apiBase={API_BASE} onClick={() => setIsRLOpen(true)} />
 
             {/* Manager chip -> what the portfolio manager is deploying, and why budget is idle */}
             <ManagerChip manager={telemetry.manager} onClick={() => setIsManagerOpen(true)} />
@@ -507,9 +513,6 @@ export default function App() {
             </button>
 
             {/* Daily PnL chip -> opens Daily Profit and Loss Calculator */}
-            {/* Income chip: profit banked today by the harvest */}
-            <IncomeChip dailyPnl={dailyPnl} onClick={() => setIsPnlCalcOpen(true)} />
-
             <DailyPnlChip dailyPnl={dailyPnl} onClick={() => setIsPnlCalcOpen(true)} />
 
             <div className="hidden 2xl:flex flex-col items-end px-3">
@@ -591,6 +594,13 @@ export default function App() {
       {isManagerOpen && (
         <Modal xl title="Agent fleet" icon={<Bot className="w-4 h-4 text-cyan-400" />} onClose={() => setIsManagerOpen(false)}>
           <ManagerPanel manager={telemetry.manager} positions={telemetry.positions} fleet={telemetry.fleet} />
+        </Modal>
+      )}
+
+      {/* RL policy modal */}
+      {isRLOpen && (
+        <Modal xl title="RL policy (PPO)" icon={<BrainCircuit className="w-4 h-4 text-cyan-400" />} onClose={() => setIsRLOpen(false)}>
+          <RLPanel apiBase={API_BASE} />
         </Modal>
       )}
 
@@ -756,7 +766,8 @@ export default function App() {
                 ['Risk / trade', `${d.risk_per_trade_pct ?? '-'}% of budget`],
                 ['Max position', `${d.max_position_notional_pct ?? '-'}%`],
                 ['Positions', `${rp.open_positions ?? 0} / ${d.max_concurrent_positions ?? '-'}`],
-                ['Daily halt', `${(rp.daily_loss_pct || 0).toFixed(2)}% / ${d.max_daily_loss_pct ?? '-'}%`],
+                ['Daily halt', `${Math.max(rp.daily_loss_pct || 0, rp.broker_day_loss_pct || 0).toFixed(2)}% / ${d.max_daily_loss_pct ?? '-'}%`],
+                ['Broker account today', `${(rp.broker_day_loss_pct || 0) > 0 ? '-' : ''}${(rp.broker_day_loss_pct || 0).toFixed(2)}% of budget`],
                 ['Entry bar', `buy_prob ≥ ${d.min_buy_prob ?? '-'}`],
                 ['At risk now', `$${(rp.total_risk_to_stops || 0).toFixed(2)} (${(rp.total_risk_pct_of_budget || 0).toFixed(2)}%)`,
                   (rp.total_risk_pct_of_budget || 0) > (d.max_daily_loss_pct || 3) ? 'text-rose-300' : 'text-emerald-300'],
@@ -1239,7 +1250,7 @@ export default function App() {
                                 className="h-full bg-amber-400 transition-all duration-300 rounded-full shadow-[0_0_8px_rgba(251,191,36,0.5)]"
                               />
                             </div>
-                            <span className="text-[9px] text-slate-500 mt-1 font-sans">Scale-Out / Trim</span>
+                            <span className="text-[9px] text-slate-500 mt-1 font-sans">Not used (full exits only)</span>
                           </div>
 
                           {/* CLOSE Probability Bar */}
