@@ -134,6 +134,16 @@ class Tape:
             self.day_last[i] = i == self.n - 1 or days[i + 1] != days[i]
         self.day = days
 
+    def atr(self, i: int, price: float) -> float:
+        """ATR at the close of bar i from the true range of the last 60 bars, as live."""
+        lo = max(0, i - 59)
+        a = QuantMatrix.true_range_atr(self.h[lo:i + 1], self.l[lo:i + 1], self.c[lo:i + 1])
+        if a is None:
+            n = i - lo + 1
+            return QuantMatrix.calculate_atr(self.c[lo:i + 1], period=min(14, max(n - 1, 1)),
+                                             ref_price=price)
+        return max(a, price * 0.0005)
+
     def ctx(self, i: int):
         """(StrategyContext, TrendRead) at the close of bar i."""
         hit = self._ctx.get(i)
@@ -151,7 +161,7 @@ class Tape:
             rsi=QuantMatrix.calculate_rsi(prices, period=rsi_p) or 50.0,
             ema_fast=QuantMatrix.calculate_ema(prices, period=min(9, n)),
             ema_slow=QuantMatrix.calculate_ema(prices, period=min(21, n)),
-            atr=QuantMatrix.calculate_atr(prices, period=rsi_p, ref_price=price),
+            atr=self.atr(i, price),
             spread=2 * self.hs,
             volume_ratio=float(self.v[i] / vr.mean()) if vr.mean() > 0 else 1.0,
             updated_at=float(self.minute[i] * 60),

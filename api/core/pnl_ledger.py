@@ -59,7 +59,8 @@ class DailyPnLLedger:
 
     @staticmethod
     def _today() -> str:
-        return time.strftime("%Y-%m-%d")
+        from core.state import ny_date
+        return ny_date()
 
     def roll(self, trading_day: str | None = None) -> Dict[str, Any]:
         day = trading_day or self._today()
@@ -88,6 +89,24 @@ class DailyPnLLedger:
         elif value < 0:
             day["gross_loss"] = round(float(day["gross_loss"]) + abs(value), 2)
             day["losing_trades"] = int(day["losing_trades"]) + 1
+        self._save()
+
+    def revise(self, symbol: str, old_pnl: float, new_pnl: float):
+        """
+        Replaces a closed trade's provisional P&L (booked from the last mark when
+        the close was sent) with the broker's fill. Re-classifies the trade as a
+        win or a loss if the fill moved it across zero; the trade count is kept.
+        """
+        day = self.roll()
+        old, new = round(float(old_pnl), 2), round(float(new_pnl), 2)
+        day["realized_pnl"] = round(float(day["realized_pnl"]) - old + new, 2)
+        for value, sign in ((old, -1), (new, 1)):
+            if value > 0:
+                day["gross_profit"] = round(float(day["gross_profit"]) + sign * value, 2)
+                day["winning_trades"] = int(day["winning_trades"]) + sign
+            elif value < 0:
+                day["gross_loss"] = round(float(day["gross_loss"]) + sign * abs(value), 2)
+                day["losing_trades"] = int(day["losing_trades"]) + sign
         self._save()
 
     def harvested_today(self) -> float:

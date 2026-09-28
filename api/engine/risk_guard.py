@@ -54,8 +54,12 @@ class RiskGuard:
         if stair_block:
             return False, stair_block
 
-        if state.daily_loss_pct >= profile.max_daily_loss_pct:
-            reason = (f"Daily loss limit hit: -{state.daily_loss_pct:.2f}% of budget "
+        booked = state.daily_loss_pct
+        broker = state.broker_day_loss_pct if settings.RISK_BROKER_EQUITY_GUARD else 0.0
+        if max(booked, broker) >= profile.max_daily_loss_pct:
+            which = (f"broker account down {broker:.2f}% of budget today"
+                     if broker > booked else f"-{booked:.2f}% of budget booked")
+            reason = (f"Daily loss limit hit: {which} "
                       f"(limit {profile.max_daily_loss_pct}% at risk dial {profile.factor}). No new entries until tomorrow.")
             if state.halt_reason != reason:
                 state.halt_reason = reason

@@ -30,6 +30,11 @@ class Settings(BaseSettings):
 
     # Portfolio-level circuit breakers (evaluated before every new entry)
     MAX_DAILY_LOSS_PERCENT: float = 3.0   # halt new entries after -3% on the day
+    # Also measure the day's loss on the broker account itself (equity vs. the
+    # previous close, relative to the bots' budget). Booked P&L missed fees and
+    # slippage and under-reported a 13% account loss as 1.6%; this cannot.
+    # Turn off only if the account is also traded by hand.
+    RISK_BROKER_EQUITY_GUARD: bool = True
     MAX_DRAWDOWN_PERCENT: float = 10.0    # halt new entries after -10% from peak equity
 
     # Signal freshness: a sentiment score older than this is not tradeable.
@@ -163,7 +168,9 @@ class Settings(BaseSettings):
     # --- US pre-market (04:00-09:30 NY) ---
     # Alpaca accepts only DAY limit orders flagged extended_hours then, and no
     # brackets: stop and target are enforced by the position's sentinel instead.
-    PREMARKET_TRADING_ENABLED: bool = True
+    # Off by default: every backtest and the RL policy's training data are
+    # regular-session bars, so a pre-market entry is outside anything tested.
+    PREMARKET_TRADING_ENABLED: bool = False
     PREMARKET_MAX_SPREAD_PCT: float = 1.0      # refuse entries on wider quotes
     PREMARKET_LIMIT_OFFSET_PCT: float = 0.10   # buy limit this far above the ask
     PREMARKET_EXIT_OFFSET_PCT: float = 0.50    # sell limit this far below the bid

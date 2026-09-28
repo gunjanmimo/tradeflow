@@ -9,6 +9,7 @@ from core.state import state, TradeDecision
 from engine.risk_guard import risk_guard
 from core.latency import latency
 from engine import brackets, loss_recovery
+from engine.fills import fills
 
 logger = logging.getLogger("tradeflow.executor")
 
@@ -138,9 +139,14 @@ class AlpacaExecutor:
                 reason="Closed at broker (bracket stop/target or manual)")
             self.close_retry_after.pop(sym, None)
             self.exit_attempts.pop(sym, None)
-            self._record_closed_trade(sym, pos, exit_price, pnl, decision)
+            record = self._record_closed_trade(sym, pos, exit_price, pnl, decision)
+            if not self.is_mock_mode and pos.get("mode") == "ALPACA_PAPER":
+                # Re-booked at the broker's fill once it is found (engine/fills.py).
+                fills.track(sym, float(pos.get("qty") or 0.0), float(pos.get("avg_entry_price") or 0.0),
+                            pnl, record, since=float(pos.get("opened_at") or time.time() - 86400))
             state.log_event("ORDER_SYNC",
-                f"{sym} closed at the broker; booked last-marked PnL ${pnl:+,.2f} against the budget")
+                f"{sym} closed at the broker; booked last-marked PnL ${pnl:+,.2f} against the budget "
+                f"(corrected to the fill once the broker reports it)")
 
     def entry_block_reason(self, symbol: str) -> Optional[str]:
         """Why a new BUY for this symbol must not be sent, or None."""
@@ -361,6 +367,8 @@ class AlpacaExecutor:
                 self._sync_open_orders(set(new_positions))
             except Exception as e:
                 logger.error(f"Open-order sync failed: {e}")
+            if fills.pending:
+                fills.reconcile_sync(self.trading_client)
         except Exception as e:
             logger.error(f"Error syncing account from Alpaca: {e}")
 
@@ -730,7 +738,7 @@ class AlpacaExecutor:
             # open, and they hold every share: close_position then fails with
             # "qty must be > 0". Clear the symbol's orders first.
             await loop.run_in_executor(None, self._cancel_open_orders, symbol)
-            await loop.run_in_executor(None, self.trading_client.close_position, symbol)
+            close_order = await loop.run_in_executor(None, self.trading_client.close_position, symbol)
             latency.record_ns("order_close", t_cl)
             self.close_retry_after.pop(symbol, None)
             self.close_failures.pop(symbol, None)
@@ -746,7 +754,10 @@ class AlpacaExecutor:
             self.recently_closed[symbol] = time.time()
             state.book_realized_pnl(symbol, pnl)
             state.active_positions.pop(symbol, None)
-            self._record_closed_trade(symbol, pos, exit_price, pnl, decision)
+            record = self._record_closed_trade(symbol, pos, exit_price, pnl, decision)
+            fills.track(symbol, float(pos["qty"]), float(pos["avg_entry_price"]), pnl, record,
+                        order_id=getattr(close_order, "id", None),
+                        since=float(pos.get("opened_at") or time.time() - 86400))
             state.log_event("ORDER_CLOSED",
                             f"Alpaca CLOSED {symbol} in {latency_ms:.1f}ms (PnL ${pnl:+,.2f}, "
                             f"day ${state.realized_pnl_today:+,.2f})")
@@ -841,6 +852,7 @@ class AlpacaExecutor:
             return
 
         self.closing_orders.add(symbol)
+        trim_order = None
         try:
             if not (self.is_mock_mode or pos.get("mode") in ("SIMULATED", "PAPER_SIMULATED")):
                 from alpaca.trading.requests import MarketOrderRequest
@@ -848,7 +860,7 @@ class AlpacaExecutor:
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, self._cancel_open_orders, symbol)
                 pos["brackets_in_engine"] = True
-                await loop.run_in_executor(None, self.trading_client.submit_order, MarketOrderRequest(
+                trim_order = await loop.run_in_executor(None, self.trading_client.submit_order, MarketOrderRequest(
                     symbol=symbol, qty=sell, side=OrderSide.SELL,
                     time_in_force=TimeInForce.DAY,
                     client_order_id=f"{ORDER_ID_PREFIX}{uuid.uuid4().hex[:20]}"))
@@ -858,6 +870,8 @@ class AlpacaExecutor:
 
             avg = float(pos["avg_entry_price"])
             pnl = round((price - avg) * sell - harvest_fee, 4 if decision.harvest else 2)
+            if trim_order is not None and not decision.harvest:
+                fills.track(symbol, sell, avg, pnl, None, order_id=getattr(trim_order, "id", None))
             if decision.harvest:
                 state.book_harvested_income(symbol, pnl)
                 pos["harvest_count"] = int(pos.get("harvest_count") or 0) + 1
@@ -1132,6 +1146,7 @@ class AlpacaExecutor:
                     if self._mark_task is None or self._mark_task.done():
                         self._mark_task = asyncio.create_task(self._run_mark_loop())
                 self.book_vanished_positions()
+                fills.apply()
                 state.roll_trading_day_if_needed()
                 state.update_peak_equity()
                 from core.pnl_ledger import pnl_ledger
@@ -1201,7 +1216,7 @@ class AlpacaExecutor:
                 state.log_event("PRICE_STALE",
                     f"{sym}: no feed price for {age:.0f}s; tracking the broker mark "
                     f"${mark:,.6g} so its stop and target stay live")
-            await market_stream.on_position_trade(sym, mark)
+            await market_stream.on_position_trade(sym, mark, is_trade=False)
             self._remark_tick[sym] = state.latest_prices.get(sym)
 
     async def emergency_close_all(self):

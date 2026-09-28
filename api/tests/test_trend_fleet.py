@@ -69,12 +69,34 @@ def test_live_ticks_build_minute_bars():
     minute_bars.drop("TICK")
 
 
-def test_history_is_prepended_behind_live_bars():
+def test_history_replaces_a_provisional_tick_bar():
+    """A bar built from trade prints is provisional: the API's real bar wins."""
     minute_bars.drop("HIST")
     minute_bars.on_tick("HIST", 5.0, 0.0, 600 * 60 + 1)
     minute_bars.merge_history("HIST", [(598, 1, 1, 1, 3.0, 0), (599, 1, 1, 1, 4.0, 0),
-                                       (600, 1, 1, 1, 99.0, 0)])   # 600 is already live
-    assert list(minute_bars.closes("HIST")) == [3.0, 4.0, 5.0]
+                                       (600, 1, 1, 1, 99.0, 0)])
+    assert list(minute_bars.closes("HIST")) == [3.0, 4.0, 99.0]
+    minute_bars.drop("HIST")
+
+
+def test_a_streamed_bar_beats_history_and_keeps_its_own_minute():
+    minute_bars.drop("HIST")
+    minute_bars.on_bar("HIST", 600, 5.0, 5.5, 4.5, 5.0, 100.0)
+    minute_bars.merge_history("HIST", [(599, 1, 1, 1, 4.0, 0), (600, 1, 1, 1, 99.0, 0)])
+    assert [r[0] for r in minute_bars.rows("HIST")] == [599, 600]
+    assert list(minute_bars.closes("HIST")) == [4.0, 5.0]
+    # A late bar for an earlier minute is inserted in order, not appended.
+    minute_bars.on_bar("HIST", 598, 3.0, 3.0, 3.0, 3.0, 1.0)
+    assert [r[0] for r in minute_bars.rows("HIST")] == [598, 599, 600]
+    minute_bars.drop("HIST")
+
+
+def test_closed_rows_leave_out_the_forming_minute():
+    minute_bars.drop("HIST")
+    minute_bars.on_bar("HIST", 600, 5.0, 5.0, 5.0, 5.0, 1.0)
+    minute_bars.on_tick("HIST", 6.0, 0.0, 601 * 60 + 5)
+    assert [r[0] for r in minute_bars.closed_rows("HIST", now=601 * 60 + 30)] == [600]
+    assert [r[0] for r in minute_bars.closed_rows("HIST", now=602 * 60)] == [600, 601]
     minute_bars.drop("HIST")
 
 

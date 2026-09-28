@@ -25,6 +25,7 @@ class MarketStreamRunner:
         self._stock_stream = None
         self._stock_bar_handler = None
         self._stock_trade_handler = None
+        self._stock_quote_handler = None
         self._stock_task = None
 
     async def start(self):
@@ -57,6 +58,8 @@ class MarketStreamRunner:
                 self._stock_task = asyncio.create_task(self._run_stock_live_feed())
             return
         await self._subscribe(stream, "bars", symbol, self._stock_bar_handler)
+        if self._stock_quote_handler is not None:
+            await self._subscribe(stream, "quotes", symbol, self._stock_quote_handler)
 
     async def ensure_position_stream(self, symbol: str):
         """
@@ -84,7 +87,7 @@ class MarketStreamRunner:
             except Exception as e:
                 logger.warning(f"Live {channel} subscribe for {symbol} failed: {e}")
 
-    async def on_position_trade(self, symbol: str, price: float):
+    async def on_position_trade(self, symbol: str, price: float, is_trade: bool = True):
         """
         Fast path for a trade print on a held position: move its live price and
         hand the tick to its sentinel, which re-evaluates BUY/HOLD/SELL/CLOSE and
@@ -95,19 +98,47 @@ class MarketStreamRunner:
             return
         t0 = time.perf_counter_ns()
         state.update_price(symbol, price, record_history=False)
+        # A real trade print belongs to the forming minute's provisional bar
+        # (replaced by the streamed bar when that minute closes). A broker mark
+        # is not a trade and never makes a bar.
+        if is_trade:
+            from core.minute_bars import minute_bars
+            minute_bars.on_tick(symbol, price)
         from engine.sentinel_agent import sentinel_registry
         await sentinel_registry.dispatch_tick(symbol, price)
         latency.record_ns("position_trade", t0)
 
-    async def on_tick_received(self, symbol: str, price: float, bid: float, ask: float, volume: float):
+    async def on_bar_received(self, symbol: str, minute: int, o: float, h: float, l: float,
+                              c: float, volume: float):
         """
-        THE SUB-SECOND CRITICAL PATH:
-        Total processing time: < 0.15 milliseconds!
+        A completed one-minute bar: the only thing that adds an indicator sample.
+        Stored under its own start minute with its real OHLCV (core/minute_bars),
+        so the live series is the same series the backtester and the RL trainer
+        replay. Quotes and trade prints only move the live price between bars.
+        """
+        from core.minute_bars import minute_bars
+        minute_bars.on_bar(symbol, minute, o, h, l, c, volume)
+        await self.on_tick_received(symbol, c, 0.0, 0.0, volume, bar=True)
+
+    def on_quote(self, symbol: str, bid: float, ask: float):
+        """Live top of book: moves bid/ask (and the spread estimate), never history."""
+        state.update_quote(symbol, bid, ask)
+
+    async def on_tick_received(self, symbol: str, price: float, bid: float, ask: float, volume: float,
+                               bar: bool = False):
+        """
+        Evaluates a new price. Only a completed bar (bar=True) records an
+        indicator sample; anything else just moves the live price.
         """
         t0 = time.perf_counter_ns()
 
         # 1. Update In-Memory State
-        state.update_price(symbol, price, bid, ask, volume)
+        state.update_price(symbol, price, bid, ask, volume, record_history=bar)
+        if not bar:
+            if symbol in state.active_positions:
+                from engine.sentinel_agent import sentinel_registry
+                asyncio.create_task(sentinel_registry.dispatch_tick(symbol, price))
+            return
 
         # 2. Run Quant Matrix (t1...tN indicators)
         t_q = time.perf_counter_ns()
@@ -166,34 +197,36 @@ class MarketStreamRunner:
             "MSFT": 428.80,
             "PLTR": 42.10,
         }
+        # One simulated "minute" bar per symbol every few seconds, so the demo
+        # moves at a watchable pace. Bars carry consecutive synthetic minutes,
+        # started far enough in the past that they never run ahead of the clock.
+        minute = int(time.time() // 60) - 200_000
 
-        # Initialize base price history so indicators have starting candles
-        for sym, p in base_prices.items():
-            for _ in range(30):
-                drift = random.uniform(-0.002, 0.002)
-                p = round(p * (1.0 + drift), 2)
-                state.update_price(sym, p, p - 0.02, p + 0.02, random.randint(100, 5000))
-            base_prices[sym] = p
+        def bar_for(sym: str) -> tuple:
+            p = base_prices.get(sym, 150.0)
+            path = [p]
+            for _ in range(4):
+                path.append(max(path[-1] * (1.0 + random.gauss(0.0, 0.0006)), 0.1))
+            base_prices[sym] = path[-1]
+            return (round(path[0], 2), round(max(path), 2), round(min(path), 2),
+                    round(path[-1], 2), float(random.randint(500, 20000)))
+
+        # Warm-up history so indicators have bars to read
+        for _ in range(60):
+            for sym in list(base_prices):
+                o, h, l, c, v = bar_for(sym)
+                await self.on_bar_received(sym, minute, o, h, l, c, v)
+            minute += 1
 
         while self._running:
             try:
-                symbols = list(state.watchlist)
-                for sym in symbols:
-                    current = base_prices.get(sym, 150.0)
-                    # Gaussian random walk with micro-drift
-                    change_pct = random.gauss(0.0001, 0.002)
-                    new_price = round(max(current * (1.0 + change_pct), 0.1), 2)
-                    base_prices[sym] = new_price
-                    
-                    spread = round(new_price * 0.0005, 2)
-                    bid = round(new_price - (spread / 2), 2)
-                    ask = round(new_price + (spread / 2), 2)
-                    vol = random.randint(50, 2000)
-
-                    await self.on_tick_received(sym, new_price, bid, ask, vol)
-
-                # Loop interval: 250ms per batch of watchlist ticks
-                await asyncio.sleep(0.25)
+                for sym in list(state.watchlist):
+                    o, h, l, c, v = bar_for(sym)
+                    half = round(c * 0.0002, 2)
+                    self.on_quote(sym, c - half, c + half)
+                    await self.on_bar_received(sym, minute, o, h, l, c, v)
+                minute += 1
+                await asyncio.sleep(2.0)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -214,18 +247,16 @@ class MarketStreamRunner:
             async def handle_stock_bar(bar):
                 # Bars are stamped with their START; the price is its close, a
                 # minute later. Age = now - bar end, i.e. pure delivery delay.
-                try:
-                    bar_end = bar.timestamp.timestamp() + 60.0
-                    latency.record_us("feed_stock_bar_age", max(time.time() - bar_end, 0.0) * 1e6)
-                except Exception:
-                    pass
-                await self.on_tick_received(
-                    symbol=bar.symbol,
-                    price=float(bar.close),
-                    bid=float(bar.close * 0.9998),
-                    ask=float(bar.close * 1.0002),
-                    volume=float(bar.volume)
-                )
+                start = bar.timestamp.timestamp()
+                latency.record_us("feed_stock_bar_age", max(time.time() - start - 60.0, 0.0) * 1e6)
+                await self.on_bar_received(
+                    bar.symbol, int(start // 60), float(bar.open), float(bar.high),
+                    float(bar.low), float(bar.close), float(bar.volume or 0.0))
+
+            async def handle_stock_quote(q):
+                bid, ask = float(q.bid_price or 0.0), float(q.ask_price or 0.0)
+                if bid > 0 and ask >= bid:
+                    self.on_quote(q.symbol, bid, ask)
 
             async def handle_stock_trade(trade):
                 try:
@@ -238,11 +269,13 @@ class MarketStreamRunner:
             held = list(state.active_positions)
             for s in sorted(set(stocks) | set(held)):
                 stock_stream.subscribe_bars(handle_stock_bar, s)
+                stock_stream.subscribe_quotes(handle_stock_quote, s)
             for s in held:
                 stock_stream.subscribe_trades(handle_stock_trade, s)
             self._stock_stream = stock_stream
             self._stock_bar_handler = handle_stock_bar
             self._stock_trade_handler = handle_stock_trade
+            self._stock_quote_handler = handle_stock_quote
 
             await stock_stream._run_forever()
         except Exception as e:
@@ -274,6 +307,9 @@ class MarketStreamRunner:
                         ts = q.timestamp.timestamp() if q.timestamp else None
                         if not usable_quote(bid, ask, ts, now):
                             continue
+                        # A live price, not an indicator sample: the poll's 15s
+                        # cadence must not leak into the one-minute bar series.
+                        self.on_quote(sym, bid, ask)
                         await self.on_tick_received(symbol=sym, price=(bid + ask) / 2,
                                                     bid=bid, ask=ask, volume=0.0)
             except asyncio.CancelledError:

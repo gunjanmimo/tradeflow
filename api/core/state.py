@@ -6,7 +6,6 @@ import asyncio
 from core.risk_profile import (
     RiskProfile, get_profile, clamp_factor, DEFAULT_RISK_FACTOR,
 )
-from core.minute_bars import minute_bars
 
 @dataclass
 class ScoredHeadline:
@@ -85,6 +84,14 @@ class TradeDecision:
     rescue: bool = False
     rescue_qty: float = 0.0
 
+def ny_date(ts: Optional[float] = None) -> str:
+    """The New York calendar date: the US trading day, whatever the host's timezone."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    return datetime.fromtimestamp(time.time() if ts is None else ts,
+                                  tz=ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+
+
 def price_decimals(price: float) -> int:
     """
     Decimal places appropriate to an asset's price scale.
@@ -125,6 +132,11 @@ class InMemoryState:
         
         # Real-time price ticks: symbol -> PriceTick
         self.latest_prices: Dict[str, PriceTick] = {}
+        # Latest top of book from the quote stream: symbol -> (bid, ask, unix time),
+        # and a smoothed relative spread per symbol (fraction of mid). The spread
+        # estimate is what live trading actually pays; the cost model uses it.
+        self.latest_quotes: Dict[str, tuple] = {}
+        self.spread_estimate: Dict[str, float] = {}
         # symbol -> when its price last CHANGED. A tick that repeats the last price
         # (a re-marked quiet position, a heartbeat) does not count, so the age of
         # this stamp tells a quiet market apart from a dead feed.
@@ -211,7 +223,7 @@ class InMemoryState:
         # Stocks Alpaca trades in fractions (from the asset catalog at start-up):
         # a profit harvest sells half of a one-share winner as 0.5 share.
         self.fractionable_symbols: set = set()
-        self.trading_day: str = time.strftime("%Y-%m-%d")
+        self.trading_day: str = ny_date()
         # High-water mark of equity, for drawdown measurement.
         self.peak_equity: float = 0.0
         # Set when a circuit breaker trips; blocks new entries but never blocks exits.
@@ -391,20 +403,47 @@ class InMemoryState:
             self.time_history[symbol] = deque(maxlen=maxlen)
         return self.price_history[symbol]
 
+    QUOTE_MAX_AGE_S = 10.0
+
+    def update_quote(self, symbol: str, bid: float, ask: float, ts: Optional[float] = None):
+        """Records a live quote. Moves bid/ask and the spread estimate, never history."""
+        if bid <= 0 or ask < bid:
+            return
+        now = time.time() if ts is None else ts
+        self.latest_quotes[symbol] = (float(bid), float(ask), now)
+        mid = (bid + ask) / 2.0
+        rel = (ask - bid) / mid if mid > 0 else 0.0
+        prev = self.spread_estimate.get(symbol)
+        # Slow EWMA: one wide quote in a burst should not swing the estimate.
+        self.spread_estimate[symbol] = rel if prev is None else 0.98 * prev + 0.02 * rel
+        tick = self.latest_prices.get(symbol)
+        if tick is not None:
+            tick.bid, tick.ask = float(bid), float(ask)
+
+    def fresh_quote(self, symbol: str, now: Optional[float] = None) -> Optional[tuple]:
+        q = self.latest_quotes.get(symbol)
+        if q is None:
+            return None
+        now = time.time() if now is None else now
+        return q if now - q[2] <= self.QUOTE_MAX_AGE_S else None
+
     def update_price(self, symbol: str, price: float, bid: float = 0.0, ask: float = 0.0,
                      volume: float = 0.0, record_history: bool = True):
         """
-        record_history=False moves the live price without adding an indicator
-        sample: used for per-trade prints on held positions, whose indicators
-        stay on the bar cadence their lookbacks were tuned for.
+        record_history=True only for a completed one-minute bar: that is the one
+        cadence the indicators, the backtester and the RL policy are built on.
+        Quotes and trade prints pass record_history=False and only move the
+        live price. Without an explicit bid/ask, a fresh streamed quote is used.
         """
+        if not (bid and ask):
+            q = self.fresh_quote(symbol)
+            if q is not None:
+                bid, ask = q[0], q[1]
         tick = PriceTick(symbol=symbol, price=price, bid=bid or price, ask=ask or price, volume=volume)
         prev = self.latest_prices.get(symbol)
         if prev is None or prev.price != price or symbol not in self.price_moved_at:
             self.price_moved_at[symbol] = tick.timestamp
         self.latest_prices[symbol] = tick
-        # Every price, trade prints included, feeds the 1-minute bars trend reads.
-        minute_bars.on_tick(symbol, price, volume, tick.timestamp)
         if record_history:
             buf = self.get_or_create_history(symbol)
             buf.append(price)
@@ -574,8 +613,8 @@ class InMemoryState:
         return None if rec is None else round(time.time() - rec.updated_at, 1)
 
     def roll_trading_day_if_needed(self):
-        """Resets the daily loss counter when the calendar day turns over."""
-        today = time.strftime("%Y-%m-%d")
+        """Resets the daily loss counter when the New York trading day turns over."""
+        today = ny_date()
         if today != self.trading_day:
             self.log_event(
                 "RISK_DAY_ROLL",
@@ -601,6 +640,36 @@ class InMemoryState:
         capital_plan.on_realized(symbol, pnl)
         from core.pnl_ledger import pnl_ledger
         pnl_ledger.on_close(symbol, pnl)
+
+    def revise_realized_pnl(self, symbol: str, old_pnl: float, new_pnl: float):
+        """
+        Corrects a booked close to the broker's actual fill. The budget, the
+        stair ladder and the daily ledger all move by the difference, so the
+        hard cap and the daily-loss halt see what the account really lost.
+        """
+        delta = round(float(new_pnl) - float(old_pnl), 2)
+        if abs(delta) < 0.005:
+            return
+        self.roll_trading_day_if_needed()
+        self.realized_pnl_today = round(self.realized_pnl_today + delta, 2)
+        from core.capital_plan import capital_plan
+        capital_plan.on_realized(symbol, delta)
+        from core.pnl_ledger import pnl_ledger
+        pnl_ledger.revise(symbol, old_pnl, new_pnl)
+
+    @property
+    def broker_day_loss_pct(self) -> float:
+        """
+        Today's loss of the whole broker account (equity vs. the previous close),
+        as a percent of the bots' budget. It includes fees, slippage and open
+        losses that booked P&L cannot see: the independent check behind the
+        daily-loss halt.
+        """
+        last = float(self.account_info.get("last_equity") or 0.0)
+        eq = float(self.account_info.get("equity") or 0.0)
+        if last <= 0 or eq <= 0 or self.allocated_capital <= 0:
+            return 0.0
+        return max(0.0, round((last - eq) / self.allocated_capital * 100.0, 3))
 
     def book_harvested_income(self, symbol: str, pnl: float):
         """

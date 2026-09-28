@@ -8,12 +8,14 @@ rate.
              sessions of 1-minute bars come from Alpaca's historical API, so the
              agents understand the trend before they act rather than waiting
              20+ minutes for live bars to accumulate
-  live       every price update (core/state.py update_price) folds into the
-             current minute's bar
+  live       a streamed minute bar (on_bar) is authoritative: it is stored
+             under its own start minute with its real open/high/low/close/volume,
+             exactly as the historical API and the backtester see it. Between
+             bars, trade prints and quotes (on_tick) keep a provisional bar for
+             the minute still forming; the streamed bar replaces it.
 
-Bars are bucketed by the minute a price ARRIVES. A streamed stock minute bar
-arrives just after its minute ends, so it lands one bucket late; at a 20-60 bar
-horizon that shift does not change the read.
+Decisions read closed_rows(): bars whose minute has ended. The forming minute is
+never an input, so live features match the backtest and training bar for bar.
 
 Nothing here makes a network call on the tick path: backfill runs in a thread
 from the trend analyst's loop.
@@ -28,7 +30,7 @@ import numpy as np
 
 logger = logging.getLogger("tradeflow.minute_bars")
 
-MAX_BARS = 390                      # one regular US session
+MAX_BARS = 780                      # two regular US sessions
 BACKFILL_RETRY_SECONDS = 900.0
 
 
@@ -36,6 +38,9 @@ class MinuteBars:
     def __init__(self):
         # symbol -> deque of [minute, open, high, low, close, volume]
         self._bars: Dict[str, deque] = {}
+        # symbol -> minute of the newest bar that came from the stream or the
+        # historical API (final), as opposed to one built from ticks.
+        self._final_minute: Dict[str, int] = {}
         self.backfilled_at: Dict[str, float] = {}
         self.last_error: Optional[str] = None
         self._inflight = False
@@ -63,13 +68,45 @@ class MinuteBars:
         else:
             dq.append([minute, price, price, price, price, volume or 0.0])
 
+    def on_bar(self, symbol: str, minute: int, o: float, h: float, l: float, c: float,
+               v: float = 0.0):
+        """
+        A completed bar from the stream, keyed by its START minute. Replaces a
+        provisional bar built from ticks for that minute, or is inserted in order.
+        """
+        if not c or c <= 0:
+            return
+        minute = int(minute)
+        row = [minute, float(o), float(h), float(l), float(c), float(v or 0.0)]
+        dq = self._bars.get(symbol)
+        if dq is None:
+            dq = self._bars[symbol] = deque(maxlen=MAX_BARS)
+        if not dq or dq[-1][0] < minute:
+            dq.append(row)
+        else:
+            rows = [b for b in dq if b[0] != minute] + [row]
+            rows.sort(key=lambda b: b[0])
+            self._bars[symbol] = deque(rows[-MAX_BARS:], maxlen=MAX_BARS)
+        self._final_minute[symbol] = max(minute, self._final_minute.get(symbol, minute))
+
     def merge_history(self, symbol: str, bars: Iterable[tuple]):
-        """Prepends historical bars older than anything already held live."""
-        dq = self._bars.get(symbol) or deque(maxlen=MAX_BARS)
-        first = dq[0][0] if dq else None
-        older = sorted((list(b) for b in bars if first is None or b[0] < first),
-                       key=lambda b: b[0])
-        self._bars[symbol] = deque(older + list(dq), maxlen=MAX_BARS)
+        """
+        Merges historical bars by minute. A historical bar replaces a provisional
+        one built from ticks for the same minute; a bar the stream delivered is
+        already final and is kept.
+        """
+        final = self._final_minute.get(symbol)
+        merged = {b[0]: list(b) for b in (self._bars.get(symbol) or ())}
+        hist = [list(b) for b in bars]
+        for b in hist:
+            if final is not None and b[0] <= final and b[0] in merged:
+                continue
+            merged[b[0]] = b
+        rows = [merged[m] for m in sorted(merged)][-MAX_BARS:]
+        self._bars[symbol] = deque(rows, maxlen=MAX_BARS)
+        if hist:
+            newest = max(b[0] for b in hist)
+            self._final_minute[symbol] = max(newest, final if final is not None else newest)
 
     # ------------------------------------------------------------------
     # Reads
@@ -86,11 +123,17 @@ class MinuteBars:
         """Copies of the bars held for a symbol: [minute, open, high, low, close, volume], oldest first."""
         return [list(b) for b in (self._bars.get(symbol) or ())]
 
+    def closed_rows(self, symbol: str, now: Optional[float] = None) -> List[list]:
+        """Bars whose minute has ended, oldest first. The forming minute is left out."""
+        cur = int((time.time() if now is None else now) // 60)
+        return [list(b) for b in (self._bars.get(symbol) or ()) if b[0] < cur]
+
     def count(self, symbol: str) -> int:
         return len(self._bars.get(symbol) or ())
 
     def drop(self, symbol: str):
         self._bars.pop(symbol, None)
+        self._final_minute.pop(symbol, None)
         self.backfilled_at.pop(symbol, None)
 
     def status(self) -> Dict:

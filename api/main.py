@@ -430,6 +430,7 @@ def _portfolio_risk_snapshot() -> Dict[str, Any]:
         "realized_pnl_today": state.realized_pnl_today,
         "harvested_income_today": state.harvested_today,
         "daily_loss_pct": state.daily_loss_pct,
+        "broker_day_loss_pct": state.broker_day_loss_pct,
         "daily_loss_limit_pct": profile.max_daily_loss_pct,
         "drawdown_pct": state.drawdown_pct,
         "drawdown_limit_pct": profile.max_drawdown_pct,
