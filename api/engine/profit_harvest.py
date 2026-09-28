@@ -16,8 +16,6 @@ Two rules keep "any profit" honest:
     last harvest -- that is, only on NEW profit. Otherwise a position sitting at
     the same small profit would be halved every retry until nothing was left.
 
-  * Crypto pays Alpaca's taker fee on the buy and again on the harvest sell,
-    so its profit must clear both fees; the income booked is net of them.
 
 A stock that Alpaca can trade in fractions is harvested in fractional shares:
 a one-share winner up $3.70 sells 0.5 share and banks about $1.85. Stocks that
@@ -33,7 +31,7 @@ import time
 from typing import Any, Dict, Optional
 
 from core.config import settings
-from core.state import state, TradeDecision, is_crypto_symbol
+from core.state import state, TradeDecision
 
 
 def sell_price(symbol: str, price: float) -> float:
@@ -45,15 +43,12 @@ def sell_price(symbol: str, price: float) -> float:
 
 def harvest_qty(symbol: str, qty: float, price: float, simulated: bool = False) -> float:
     """
-    Quantity a harvest may sell, rounded down. Crypto at its own precision. A
-    fractionable stock (or a simulated position) in fractional shares to
+    Quantity a harvest may sell, rounded down. A fractionable stock (or a simulated position) in fractional shares to
     HARVEST_FRACTION_DECIMALS, subject to Alpaca's fractional-order minimum
     notional; any other stock in whole shares only.
     """
     import math
     from engine.executor import AlpacaExecutor
-    if is_crypto_symbol(symbol):
-        return AlpacaExecutor._round_qty(symbol, qty, price)
     whole = float(math.floor(qty))
     if not (simulated or symbol in state.fractionable_symbols):
         return whole
@@ -65,11 +60,8 @@ def harvest_qty(symbol: str, qty: float, price: float, simulated: bool = False) 
 
 
 def net_unit_profit(symbol: str, fill: float, entry: float) -> float:
-    """Profit per unit sold at `fill`, after crypto fees on both the buy and this sell."""
-    if not is_crypto_symbol(symbol):
-        return fill - entry
-    fee = settings.CRYPTO_TAKER_FEE_BPS / 1e4
-    return fill * (1.0 - fee) - entry * (1.0 + fee)
+    """Profit per unit sold at `fill`."""
+    return fill - entry
 
 
 def check(symbol: str, pos: Dict[str, Any], price: float, qty: float, entry: float,
@@ -110,6 +102,5 @@ def check(symbol: str, pos: Dict[str, Any], price: float, qty: float, entry: flo
     return TradeDecision(
         symbol=symbol, action="SELL", fraction=fraction, harvest=True,
         reason=(f"Profit harvest: unrealised ${profit:+,.2f} at the bid ${fill:,.6g}"
-                + (" after fees" if is_crypto_symbol(symbol) else "")
                 + f"; selling {sell:g} of {qty:g} to bank ${income:,.2f} as day income"),
     )

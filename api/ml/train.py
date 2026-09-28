@@ -52,7 +52,7 @@ def _bt_job(args):
                 f = getattr(t, "features", None)
                 if f is None:
                     continue
-                out.append({"bars": f, "strat": strategy_index(name), "crypto": tape.crypto,
+                out.append({"bars": f, "strat": strategy_index(name), "crypto": False,
                             "ret": t.pnl / notional * 100.0, "t": t.entry_minute * 60.0, "live": False})
     return out
 

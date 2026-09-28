@@ -32,7 +32,6 @@ class AdaptiveStrategy(Strategy):
         "at that moment. Exits are handled by whichever strategy opened the trade."
     )
     source = "Regime-switching meta-strategy over the quant library"
-    applies_to = "any"
     requires_sentiment = False
     params = {"min_regime_confidence": 0.0}
 
@@ -70,10 +69,8 @@ class AdaptiveStrategy(Strategy):
         # The worker already ranked every suited strategy; only the top few are
         # re-checked here against the live tick, which keeps the per-tick cost at
         # a few strategies instead of the whole library.
-        klass = "crypto" if ctx.is_crypto else "equity"
         shortlist = [registry.get(n) for n in ranked]
-        shortlist = [st for st in shortlist
-                     if st is not None and st.applies_to in ("any", klass)][:settings.ADAPTIVE_TOP_K]
+        shortlist = [st for st in shortlist if st is not None][:settings.ADAPTIVE_TOP_K]
 
         gates["candidates"] = {}
         best, best_score, best_dec = None, -1.0, None

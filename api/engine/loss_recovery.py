@@ -27,9 +27,7 @@ What happens now, for a position whose stop is still below its entry:
                     position only when the price trend agrees. Without that,
                     the stop keeps protecting it.
 
-  rescue add        Stocks only by default (RECOVERY_ADD_CRYPTO): on crypto
-                    the extra taker fees made it lose money in the backtest.
-                    One small add, a "micro trade", while the position is
+  rescue add        One small add, a "micro trade", while the position is
                     between RECOVERY_ADD_MIN_R and RECOVERY_ADD_MAX_R of its
                     stop distance under water and the price has stopped
                     falling (the micro trend is flat or up, no fresh bearish
@@ -53,7 +51,7 @@ import time
 from typing import Any, Dict, Optional, Tuple
 
 from core.config import settings
-from core.state import state, TradeDecision, round_price, is_crypto_symbol
+from core.state import state, TradeDecision, round_price
 
 
 def _risk_per_share(pos: Dict[str, Any], entry: float, stop: float) -> float:
@@ -179,8 +177,6 @@ def check_rescue(symbol: str, pos: Dict[str, Any], price: float, qty: float, ent
     `trend` is the symbol's TrendRead; read from the live board when omitted.
     """
     if not (settings.RECOVERY_ENABLED and settings.RECOVERY_ADD_ENABLED):
-        return None
-    if is_crypto_symbol(symbol) and not settings.RECOVERY_ADD_CRYPTO:
         return None
     if pos.get("rescued") or pos.get("scaled_in") or qty <= 0 or entry <= 0 or stop >= entry:
         return None

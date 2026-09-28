@@ -45,7 +45,7 @@ def world(monkeypatch):
     yield PortfolioManager(), executed
     board.reads.clear()
     from core.minute_bars import minute_bars
-    for sym in ("AAPL", "MSFT", "JNJ", "NVDA", "KO", "BTC/USD"):
+    for sym in ("AAPL", "MSFT", "JNJ", "NVDA", "KO"):
         minute_bars.drop(sym)
     state.watchlist.clear()
     state.watchlist.update(saved[0])
@@ -163,9 +163,10 @@ def test_price_changes_are_tracked_across_cycles(world, monkeypatch):
     _price("JNJ", 100.0)
     _signals(monkeypatch, {}, blocked_by="score")
     t0 = time.time()
-    # Seed history as if the manager had been watching for 5 minutes: 100 -> 102.
+    # Seed history as if the manager had been watching for 5 minutes: 100 -> 102,
+    # every sample inside the 5-minute window the change is measured over.
     for i in range(160):
-        mgr._sample("JNJ", 100.0 + 2.0 * i / 159, t0 - 320 + i * 2)
+        mgr._sample("JNJ", 100.0 + 2.0 * i / 159, t0 - 298 + i * (296 / 159))
     state.update_price("JNJ", 102.0)
     asyncio.run(mgr.run_cycle())
     row = mgr.watch[0]
@@ -194,17 +195,6 @@ def test_full_slots_explain_why_budget_cannot_be_used(world, monkeypatch):
     assert mgr.status["budget"]["dial_deployable_pct"] == 75.0    # 5 x 15%
 
 
-def test_no_stock_entries_near_the_close_but_crypto_is_fine(world, monkeypatch):
-    mgr, executed = world
-    import core.market_hours as mh
-    monkeypatch.setattr(mh, "minutes_to_close", lambda *a, **k: 20.0)
-    _price("AAPL"); _price("BTC/USD", 80000.0)
-    _signals(monkeypatch, {"AAPL": 0.9, "BTC/USD": 0.7})
-    asyncio.run(mgr.run_cycle())
-    assert executed == ["BTC/USD"]
-    assert mgr.blocked_by.get("too close to the market close") == 1
-    state.latest_prices.pop("BTC/USD", None)
-    state.price_moved_at.pop("BTC/USD", None)
 
 
 def test_a_frozen_price_is_not_entered(world, monkeypatch):
@@ -287,3 +277,14 @@ def test_tick_path_takes_entries_back_when_the_manager_stalls(world):
     assert mgr.snapshot()["state"] == "stalled"
     mgr.last_cycle_at = 0.0                               # wedged on its very first cycle
     assert mgr.snapshot()["state"] == "stalled"
+
+
+def test_no_entries_near_the_close(world, monkeypatch):
+    mgr, executed = world
+    import core.market_hours as mh
+    monkeypatch.setattr(mh, "minutes_to_close", lambda *a, **k: 20.0)
+    _price("AAPL")
+    _signals(monkeypatch, {"AAPL": 0.9})
+    asyncio.run(mgr.run_cycle())
+    assert executed == []
+    assert mgr.blocked_by.get("too close to the market close") == 1

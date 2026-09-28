@@ -38,7 +38,8 @@ from core.config import settings
 from core.state import state
 from core.universe import universe
 
-# eToro lists crypto bare; these are read as the USD pair even when not watched.
+# eToro lists crypto bare ("BTC"). Crypto is not traded here, so these are
+# dropped rather than mistaken for stock tickers.
 _CRYPTO_BASES = frozenset({
     "BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "AVAX", "LINK", "LTC", "BCH",
     "DOT", "SHIB", "UNI", "XLM", "TRX", "BNB",
@@ -404,17 +405,16 @@ class MultiSourceTrendAggregator:
         """
         Maps an eToro instrument symbol onto the spelling we trade.
 
-        Crypto is listed bare ("BTC"); we track pairs ("BTC/USD"). A foreign
-        listing ("AZN.L") maps to its US ADR when one exists. Anything else is
+        Crypto (listed bare, e.g. "BTC") is dropped: only US equities are
+        traded. A foreign listing ("AZN.L") maps to its US ADR when one exists. Anything else is
         kept as-is: it is not tradable here, but it is still a discovery signal
         (a country ETF is offered as the proxy).
         """
         s = etoro_sym.upper().strip()
         if not s:
             return None
-        pair = f"{s}/USD"
-        if pair in state.watchlist or s in _CRYPTO_BASES:
-            return pair
+        if s in _CRYPTO_BASES:
+            return None
         if "." in s and s != "BRK.B":
             return universe.tradable_symbol(s) or s
         return s

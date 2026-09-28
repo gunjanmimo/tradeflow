@@ -135,7 +135,6 @@ export default function App() {
 
   const [newSymbol, setNewSymbol] = useState("");
   const [isSyncingTrends, setIsSyncingTrends] = useState(false);
-  const [assetFilter, setAssetFilter] = useState("ALL"); // "ALL", "STOCKS", "CRYPTO"
   const [experts, setExperts] = useState([]);
   
   // Interactive Trading Budget Controls
@@ -169,8 +168,6 @@ export default function App() {
   const lastFrameRef = useRef(null);
   const frameGapRef = useRef(null);
   const frameAgeRef = useRef(null);
-
-  const isCrypto = (sym) => sym.includes('/USD') || ['BTC', 'ETH', 'SOL'].includes(sym);
 
   // Live portfolio risk from telemetry, and the limits for the dial position the
   // user is currently looking at (which may lead telemetry by one round-trip).
@@ -411,30 +408,23 @@ export default function App() {
             </div>
           </div>
 
-          {/* Market status: one pill that says whether stocks are trading, plus always-on crypto */}
+          {/* Market status: one pill that says whether stocks are trading */}
           {(() => {
             const stocksLive = clock.is_us_market_open || clock.is_eu_market_open;
             const venues = [clock.is_us_market_open && 'US', clock.is_eu_market_open && 'EU'].filter(Boolean).join(' + ');
             const stocksOn = telemetry.markets?.markets?.stocks !== false;
-            const cryptoOn = telemetry.markets?.markets?.crypto !== false;
             return (
               <div
                 className="hidden lg:flex items-center rounded-full bg-white/[0.03] ring-1 ring-white/10 text-xs font-medium"
                 title={stocksLive ? `Stock markets open: ${venues}` : `Stock markets closed · next US open: ${clock.next_us_open || '09:30 AM EST'}`}
               >
-                <button type="button" onClick={() => setIsMarketsOpen(true)} className="flex items-center gap-2 pl-3 pr-3 py-1.5 rounded-l-full hover:bg-white/[0.05] transition-colors">
+                <button type="button" onClick={() => setIsMarketsOpen(true)} className="flex items-center gap-2 pl-3 pr-3 py-1.5 rounded-full hover:bg-white/[0.05] transition-colors">
                   <span className={`w-2 h-2 rounded-full ${!stocksOn ? 'bg-rose-500' : stocksLive ? 'bg-emerald-400 animate-pulse shadow-[0_0_8px] shadow-emerald-400' : 'bg-slate-500'}`} />
                   <span className="text-slate-400">Stocks</span>
                   <span className={stocksLive ? 'text-emerald-300 font-semibold' : 'text-slate-300'}>
                     {stocksLive ? `LIVE${venues ? ` · ${venues}` : ''}` : 'CLOSED'}
                   </span>
                   {!stocksOn && <span className="text-rose-300 font-semibold">· OFF</span>}
-                </button>
-                <span className="w-px h-4 bg-white/10" />
-                <button type="button" onClick={() => setIsMarketsOpen(true)} className="flex items-center gap-2 pl-3 pr-3 py-1.5 rounded-r-full hover:bg-white/[0.05] transition-colors" title="Crypto trades 24/7 · click to switch markets on/off">
-                  <span className={`w-2 h-2 rounded-full ${cryptoOn ? 'bg-cyan-400 animate-pulse' : 'bg-rose-500'}`} />
-                  <span className="text-slate-400">Crypto</span>
-                  <span className={cryptoOn ? 'text-cyan-300 font-semibold' : 'text-rose-300 font-semibold'}>{cryptoOn ? '24/7' : 'OFF'}</span>
                 </button>
               </div>
             );
@@ -898,33 +888,11 @@ export default function App() {
                 <h2 className="font-semibold text-base text-slate-100">Dynamic Watchlist & Quant Matrix</h2>
               </div>
 
-              {/* Asset Filter Tabs */}
-              <div className="flex items-center bg-slate-900 border border-slate-800 rounded-lg p-0.5 text-[11px] font-mono">
-                <button
-                  onClick={() => setAssetFilter("ALL")}
-                  className={`px-2.5 py-1 rounded-md transition-all ${assetFilter === "ALL" ? "bg-cyan-500 text-slate-950 font-bold" : "text-slate-400 hover:text-white"}`}
-                >
-                  ALL
-                </button>
-                <button
-                  onClick={() => setAssetFilter("STOCKS")}
-                  className={`px-2.5 py-1 rounded-md transition-all ${assetFilter === "STOCKS" ? "bg-cyan-500 text-slate-950 font-bold" : "text-slate-400 hover:text-white"}`}
-                >
-                  STOCKS
-                </button>
-                <button
-                  onClick={() => setAssetFilter("CRYPTO")}
-                  className={`px-2.5 py-1 rounded-md transition-all ${assetFilter === "CRYPTO" ? "bg-cyan-500 text-slate-950 font-bold" : "text-slate-400 hover:text-white"}`}
-                >
-                  CRYPTO (24/7)
-                </button>
-              </div>
-              
               {/* Add ticker form */}
               <form onSubmit={addWatchlist} className="flex items-center space-x-2">
                 <input
                   type="text"
-                  placeholder="ADD TICKER (e.g. SOL/USD)"
+                  placeholder="ADD TICKER (e.g. AMD)"
                   value={newSymbol}
                   onChange={(e) => setNewSymbol(e.target.value)}
                   className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs uppercase font-mono text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyan-500"
@@ -953,17 +921,11 @@ export default function App() {
                 </thead>
                 <tbody className="divide-y divide-slate-800/60 font-mono">
                   {(telemetry.watchlist || [])
-                    .filter((sym) => {
-                      if (assetFilter === "STOCKS") return !isCrypto(sym);
-                      if (assetFilter === "CRYPTO") return isCrypto(sym);
-                      return true;
-                    })
                     .map((sym) => {
                     const tick = telemetry.latest_prices?.[sym];
                     const quant = telemetry.quant_metrics?.[sym];
                     const sentiment = telemetry.sentiment?.[sym];
                     const isHolding = !!telemetry.positions?.[sym];
-                    const isCryptoPair = isCrypto(sym);
 
                     const posProb = sentiment?.pos_prob ?? 0.5;
                     const negProb = sentiment?.neg_prob ?? 0.5;
@@ -972,11 +934,6 @@ export default function App() {
                       <tr key={sym} className="hover:bg-slate-800/20 transition-colors">
                         <td className="py-3 font-bold text-slate-200 flex items-center space-x-1.5">
                           <span>{sym}</span>
-                          <span className={`text-[9px] px-1 rounded border font-mono ${
-                            isCryptoPair ? 'bg-purple-500/10 text-purple-300 border-purple-500/20' : 'bg-blue-500/10 text-blue-300 border-blue-500/20'
-                          }`}>
-                            {isCryptoPair ? '24/7' : 'STOCK'}
-                          </span>
                           {isHolding && (
                             <span className="text-[9px] bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-1 rounded">
                               HELD

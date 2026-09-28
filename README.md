@@ -3,7 +3,7 @@
 > [!CAUTION]
 > **Use at your own risk.** TradeFlow is a personal side project, **not a battle-tested trading tool**. It can place real orders, and automated trading can lose money quickly.
 >
-> **Do not use it if you don't understand the computation behind it, quantitative finance, and how stock and crypto markets work.** Nothing here is financial advice. Strategies, backtests and analytics can be wrong, and past behaviour does not predict future results.
+> **Do not use it if you don't understand the computation behind it, quantitative finance, and how stock markets work.** Nothing here is financial advice. Strategies, backtests and analytics can be wrong, and past behaviour does not predict future results.
 >
 > Start with **paper trading** (the default), read the code before trusting it, and never trade money you cannot afford to lose. The software is provided "as is", without warranty of any kind (see [LICENSE](LICENSE)).
 
@@ -86,16 +86,13 @@ docker compose down
 
 ---
 
-## 📊 Features & Asset Classes
+## 📊 Features
 
-- **Dual Asset Support (US Equities + 24/7 Crypto)**:
-  - **US Equities**: `NVDA`, `AAPL`, `MSFT`, `PLTR`, etc. (NYSE / NASDAQ).
-  - **24/7 Cryptocurrencies**: `BTC/USD`, `ETH/USD`, `SOL/USD` (Trades continuously 24/7/365, including weekends and evenings!).
-  - **Fractional Sizing for Crypto**: Automatically sizes positions in decimal quantities (e.g. `0.024 BTC`).
-- **4-Pillar Consensus Engine**: Fuses **SEC Form 4 / On-Chain Whale Flows** (35%), **eToro Copy Portfolios** (25%), **Dub/Public Thematic Pies** (20%), and **StockTwits Sentiment** (20%).
+- **US equities only**: `NVDA`, `AAPL`, `MSFT`, `PLTR`, etc. (NYSE / NASDAQ), day-traded and flat before the close. Crypto was removed: at Alpaca's 25 bps taker fee per side, no short-horizon signal we tested came close to covering the costs.
+- **4-Pillar Consensus Engine**: Fuses **SEC Form 4** (35%), **eToro Copy Portfolios** (25%), **Dub/Public Thematic Pies** (20%), and **StockTwits Sentiment** (20%).
 - **In-Process Laya Model**: Classifies financial catalysts and news headlines into calibrated probabilities in **15–35ms**.
 - **C-Speed Quant Matrix ($t_1 \dots t_N$)**: Evaluates EMA 9/21, RSI 14, ATR volatility, and bid-ask spreads in **< 0.05ms**.
-- **Interactive Dashboard**: Filter by `ALL`, `STOCKS`, or `CRYPTO (24/7)`, inject live news to test Laya, and manage positions.
+- **Interactive Dashboard**: watchlist, live positions, inject news to test Laya, and manage positions.
 - **Emergency Kill Switch**: Panic button to liquidate open positions and halt trading immediately.
 
 ---
@@ -158,11 +155,11 @@ The **Latency** chip in the header shows tick-to-decision p50/p95 and the dashbo
 curl localhost:8000/api/latency                # per-stage latency percentiles
 curl localhost:8000/api/quant/library          # strategies + track record
 curl localhost:8000/api/quant/regimes          # live regime per symbol
-curl localhost:8000/api/quant/analyze/BTC/USD  # council votes, Monte Carlo, pair
+curl localhost:8000/api/quant/analyze/NVDA     # council votes, Monte Carlo, pair
 curl localhost:8000/api/quant/portfolio        # VaR/CVaR, Sharpe/Sortino, drawdown
-# Let crypto bots pick strategies per moment:
+# Let the bots pick strategies per moment:
 curl -X POST localhost:8000/api/strategies/class -H 'content-type: application/json' \
-     -d '{"asset_class":"crypto","strategy":"adaptive"}'
+     -d '{"asset_class":"equity","strategy":"adaptive"}'
 ```
 
 ---
@@ -187,7 +184,7 @@ Rules:
 - **Stair never raises risk to reach a target.** Strategies, stops and the risk dial are unchanged.
 - **Main broker equity is locked.** When a budget or deposit is assigned to the bot in classic or stair mode, the main broker equity outside the budget cap is strictly locked (`locked_broker_equity = max(0, broker_equity - assigned_capital)`). The bot operates exclusively within its hard cap and never touches locked broker equity or cash.
 - **If trading capital falls below the smallest order the engine can place, new entries stop.** The reserve and banked income are never used to top it up.
-- **Stair refuses to start with capital too small to trade.** At risk dial 4, one position is capped at 15% of capital, so crypto needs at least $100 of trading capital (stocks $200).
+- **Stair refuses to start with capital too small to trade.** At risk dial 4, one position is capped at 15% of capital, so it needs at least $200 of trading capital.
 - **The engine cannot move money.** Reserve and banked income stay as cash at the broker; withdraw them there.
 - **The ladder is saved to `api/data/capital_plan.json`,** so it survives restarts. Banked income carries over when a ladder is restarted.
 
@@ -242,11 +239,11 @@ Missing components don't vote. Nothing is traded until you promote a candidate t
 
 **Entry gate** (`engine/diversification.py`). Every buy is clamped to the headroom in its sleeves:
 
-| Dial | Sector | Crypto | US | Europe / Asia | Min defensive | Correlation halving at |
-|---|---|---|---|---|---|---|
-| 1 | 20% | 5% | 50% | 20% | 30% | 0.60 |
-| 4 (default) | 30% | 15% | 60% | 20% | 20% | 0.75 |
-| 10 | 50% | 35% | 90% | 40% | 0% | 0.90 |
+| Dial | Sector | US | Europe / Asia | Min defensive | Correlation halving at |
+|---|---|---|---|---|---|
+| 1 | 20% | 50% | 20% | 30% | 0.60 |
+| 4 (default) | 30% | 60% | 20% | 20% | 0.75 |
+| 10 | 50% | 90% | 40% | 0% | 0.90 |
 
 - Percentages are of the trading budget. Levels 2, 3 and 5–9 are in `core/risk_profile.py`.
 - A new position more correlated than the limit with an existing holding gets half size.

@@ -30,9 +30,9 @@ from typing import Dict, Any, List, Optional
 import numpy as np
 
 from core.config import settings
-from core.state import state, is_crypto_symbol
+from core.state import state
 from core.universe import (
-    universe, curated_symbols, benchmark_etfs, SECTOR_ETF, CRYPTO, DIVERSIFIED,
+    universe, curated_symbols, benchmark_etfs, SECTOR_ETF, DIVERSIFIED,
 )
 from engine.diversification import diversification, budget_base
 from feeds.daily_bars import daily_bars
@@ -327,7 +327,7 @@ class DiscoveryService:
             # --- Diversification fit (same caps as the entry gate) ---
             if meta["tradable_on_alpaca"]:
                 a = diversification.assess(sym)
-                min_useful = min(std_position, 30.0 if not is_crypto_symbol(sym) else 15.0)
+                min_useful = min(std_position, 30.0)
                 if a.max_dollars < min_useful:
                     fit = 0.0
                     reasons.append(f"Blocked by {a.binding}" if a.headroom_dollars < min_useful
@@ -337,7 +337,7 @@ class DiscoveryService:
                     if meta["region"] in under_target_regions:
                         fit += 0.25
                         reasons.append(f"Fills under-target region {meta['region']}")
-                    if meta["sector"] not in held_sectors and meta["sector"] not in (CRYPTO, DIVERSIFIED):
+                    if meta["sector"] not in held_sectors and meta["sector"] != DIVERSIFIED:
                         fit += 0.15
                     if defensive_short and meta["is_defensive"]:
                         fit += 0.2
@@ -366,7 +366,7 @@ class DiscoveryService:
         ranked = sorted(
             (c for c in self.candidates.values()
              if c["meta"]["tradable_on_alpaca"] and c["status"] == "candidate"
-             and not is_crypto_symbol(c["symbol"]) and c["meta"]["asset_type"] != "etf"),
+             and c["meta"]["asset_type"] != "etf"),
             key=lambda c: (c.get("score") is not None, c.get("score") or 0.0, bool(c["smart_money"])),
             reverse=True)
         self._sentiment_symbols = [c["symbol"] for c in ranked[:settings.DISCOVERY_SENTIMENT_TOP_N]]
@@ -392,7 +392,6 @@ class DiscoveryService:
             (c for c in self.candidates.values()
              if c.get("score") is not None and c["status"] != "dismissed"
              and c["meta"]["tradable_on_alpaca"] and c["meta"]["asset_type"] != "etf"
-             and not is_crypto_symbol(c["symbol"])
              and c["components"].get("diversification", 1.0) > 0
              and not market_filter.entry_block_reason(c["symbol"])),
             key=lambda c: c["score"], reverse=True)

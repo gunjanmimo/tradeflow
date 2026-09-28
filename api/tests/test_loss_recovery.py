@@ -98,11 +98,6 @@ def test_no_rescue_on_bearish_news_or_a_strategy_exit(trend):
     assert _rescue(_pos(), 97.5, strategy_exiting=True) is None
 
 
-def test_no_rescue_on_crypto_by_default(trend, monkeypatch):
-    pos = _pos(symbol="RCVR/USD")
-    assert loss_recovery.check_rescue("RCVR/USD", pos, 97.5, QTY, ENTRY, STOP,
-                                      news_bearish=False, strategy_exiting=False, now=1e9,
-                                      trend=board.read(SYM)) is None
 
 
 def test_rescue_is_once_and_throttled(trend):

@@ -7,15 +7,14 @@ capex cycle; the engine could not see that because nothing knew what a symbol wa
 Classification order (first hit wins):
   1. The curated table below: GICS sector leaders, defence/biotech/energy themes,
      US-listed ADRs of UK/European/Asian companies, and sector/country ETFs.
-  2. Crypto pairs: one "Crypto" sleeve.
-  3. SEC EDGAR SIC code, fetched lazily for US tickers we have never seen
+  2. SEC EDGAR SIC code, fetched lazily for US tickers we have never seen
      (e.g. an insider buy discovered via Form 4). SIC is not GICS, so the mapping
      is approximate and marked source="sec_sic".
-  4. Foreign listing suffix (".L", ".NS", ".HK"...): country is known, and a
+  3. Foreign listing suffix (".L", ".NS", ".HK"...): country is known, and a
      US-listed ADR is substituted where one exists. Without one the symbol is
      visible for discovery but not tradable on Alpaca; a country ETF is offered
      as the tradable proxy.
-  5. Otherwise "Unclassified" -- still capped like any sector, never exempt.
+  4. Otherwise "Unclassified" -- still capped like any sector, never exempt.
 """
 import asyncio
 import logging
@@ -31,7 +30,6 @@ GICS_SECTORS = (
     "Consumer Discretionary", "Health Care", "Industrials", "Consumer Staples",
     "Energy", "Utilities", "Materials", "Real Estate",
 )
-CRYPTO = "Crypto"
 DIVERSIFIED = "Diversified"      # broad/country ETFs: diversified by construction
 COMMODITIES = "Commodities"
 UNCLASSIFIED = "Unclassified"
@@ -46,8 +44,8 @@ SECTOR_ETF = {
     "Energy": "XLE", "Utilities": "XLU", "Materials": "XLB", "Real Estate": "XLRE",
 }
 
-US, EUROPE, ASIA, REGION_CRYPTO, GLOBAL, OTHER = (
-    "US", "Europe/UK", "Asia", "Crypto", "Global", "Other")
+US, EUROPE, ASIA, GLOBAL, OTHER = (
+    "US", "Europe/UK", "Asia", "Global", "Other")
 
 _COUNTRY_REGION = {
     "US": US,
@@ -87,7 +85,7 @@ class SymbolMeta:
     country: str
     region: str
     currency: str
-    asset_type: str           # "stock" | "adr" | "etf" | "crypto" | "foreign"
+    asset_type: str           # "stock" | "adr" | "etf" | "foreign"
     source: str               # "curated" | "rule" | "sec_sic" | "suffix" | "unknown"
     tradable_on_alpaca: bool = True
     proxy: Optional[str] = None   # tradable substitute when not directly tradable
@@ -316,10 +314,9 @@ def region_of(country: str) -> str:
 
 def _meta(symbol, name, sector, theme, country, asset_type, source,
           tradable=True, proxy=None) -> SymbolMeta:
-    region = REGION_CRYPTO if asset_type == "crypto" else region_of(country)
     return SymbolMeta(
         symbol=symbol, name=name, sector=sector, theme=theme, country=country,
-        region=region, currency="USD" if asset_type in ("crypto", "adr", "etf", "stock")
+        region=region_of(country), currency="USD" if asset_type in ("adr", "etf", "stock")
         else _COUNTRY_CURRENCY.get(country, "?"),
         asset_type=asset_type, source=source, tradable_on_alpaca=tradable, proxy=proxy,
     )
@@ -411,8 +408,8 @@ class Universe:
         if m:
             return m
         if "/" in sym:
-            base = sym.split("/")[0]
-            return _meta(sym, base, CRYPTO, "Crypto", "Global", "crypto", "rule")
+            # A currency or crypto pair: not a US equity, never tradable here.
+            return _meta(sym, sym, UNCLASSIFIED, "", "Global", "foreign", "rule", tradable=False)
         m = self._dynamic.get(sym)
         if m:
             return m

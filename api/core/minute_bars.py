@@ -1,9 +1,8 @@
 """
 One-minute OHLCV bars per symbol: the time series the trend analyst reads.
 
-The tick buffer in core/state.py holds 250 samples, which is ~2 minutes of a
-crypto pair polled twice a second -- far too short to call a trend. Bars are
-time-bucketed instead, so every symbol gets the same clock whatever its tick rate.
+Bars are time-bucketed, so every symbol gets the same clock whatever its tick
+rate.
 
   backfill   at start-up and for every symbol newly watched or held, the last
              sessions of 1-minute bars come from Alpaca's historical API, so the
@@ -120,11 +119,8 @@ class MinuteBars:
         try:
             loop = asyncio.get_running_loop()
             got = 0
-            stocks = [s for s in todo if "/" not in s]
-            cryptos = [s for s in todo if "/" in s]
-            for batch, crypto in ([(stocks[i:i + 25], False) for i in range(0, len(stocks), 25)]
-                                  + [(cryptos[i:i + 25], True) for i in range(0, len(cryptos), 25)]):
-                result = await loop.run_in_executor(None, self._fetch_sync, batch, crypto)
+            for i in range(0, len(todo), 25):
+                result = await loop.run_in_executor(None, self._fetch_sync, todo[i:i + 25])
                 for sym, bars in result.items():
                     self.merge_history(sym, bars)
                     got += 1
@@ -140,28 +136,22 @@ class MinuteBars:
         finally:
             self._inflight = False
 
-    def _fetch_sync(self, symbols: List[str], crypto: bool) -> Dict[str, list]:
+    def _fetch_sync(self, symbols: List[str]) -> Dict[str, list]:
         from datetime import datetime, timedelta, timezone
         from core.config import settings
-        from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
-        from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
+        from alpaca.data.historical import StockHistoricalDataClient
+        from alpaca.data.requests import StockBarsRequest
         from alpaca.data.timeframe import TimeFrame
+        from alpaca.data.enums import DataFeed
 
         end = datetime.now(timezone.utc)
-        if crypto:
-            client = CryptoHistoricalDataClient(settings.ALPACA_API_KEY, settings.ALPACA_SECRET_KEY)
-            resp = client.get_crypto_bars(CryptoBarsRequest(
-                symbol_or_symbols=symbols, timeframe=TimeFrame.Minute,
-                start=end - timedelta(hours=7), end=end))
-        else:
-            from alpaca.data.enums import DataFeed
-            client = StockHistoricalDataClient(settings.ALPACA_API_KEY, settings.ALPACA_SECRET_KEY)
-            # IEX: the free plan may not query the last 15 minutes of SIP data,
-            # which is exactly the part an intraday trend needs. Four calendar
-            # days reach back across a weekend to the previous session.
-            resp = client.get_stock_bars(StockBarsRequest(
-                symbol_or_symbols=symbols, timeframe=TimeFrame.Minute,
-                start=end - timedelta(days=4), end=end, feed=DataFeed.IEX))
+        client = StockHistoricalDataClient(settings.ALPACA_API_KEY, settings.ALPACA_SECRET_KEY)
+        # IEX: the free plan may not query the last 15 minutes of SIP data,
+        # which is exactly the part an intraday trend needs. Four calendar
+        # days reach back across a weekend to the previous session.
+        resp = client.get_stock_bars(StockBarsRequest(
+            symbol_or_symbols=symbols, timeframe=TimeFrame.Minute,
+            start=end - timedelta(days=4), end=end, feed=DataFeed.IEX))
         out: Dict[str, list] = {}
         for sym, bars in (getattr(resp, "data", None) or {}).items():
             rows = [(int(b.timestamp.timestamp() // 60), float(b.open), float(b.high),

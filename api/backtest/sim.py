@@ -20,8 +20,7 @@ What a one-minute bar cannot show, and how it is modelled (conservatively):
   * profit harvest        fires at the first price where the bid beats the
                           reference (entry, last harvest, or the USD minimum),
                           or the bar's open if it gapped past it
-  * spread and fees       every market fill pays half the spread; crypto pays
-                          Alpaca's taker fee on both sides. No news history
+  * spread                every market fill pays half the spread. No news history
                           exists, so sentiment is neutral with no headlines:
                           news-driven strategies and exits cannot be tested.
 
@@ -38,7 +37,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 
 from core.config import settings
-from core.state import state, QuantMetrics, SentimentRecord, is_crypto_symbol, qty_decimals
+from core.state import state, QuantMetrics, SentimentRecord
 from engine import brackets, loss_recovery, profit_harvest
 from engine.quant_matrix import QuantMatrix
 from engine.strategies.base import StrategyContext
@@ -74,8 +73,6 @@ VARIANTS: Dict[str, Dict[str, Any]] = {
 @dataclass
 class Costs:
     stock_half_spread_bps: float = 2.0
-    crypto_half_spread_bps: float = 5.0
-    crypto_fee_bps: float = 25.0      # Alpaca crypto taker fee, lowest volume tier
 
 
 @dataclass
@@ -107,10 +104,7 @@ def overrides(values: Dict[str, Any]):
 
 
 def round_qty(symbol: str, qty: float, price: float) -> float:
-    """As AlpacaExecutor._round_qty: whole shares, or crypto precision."""
-    if is_crypto_symbol(symbol):
-        d = qty_decimals(price)
-        return math.floor(qty * 10 ** d) / 10 ** d
+    """As AlpacaExecutor._round_qty: whole shares."""
     return float(math.floor(qty))
 
 
@@ -123,24 +117,22 @@ class Tape:
         self.minute = a[:, 0].astype(np.int64)
         self.o, self.h, self.l, self.c, self.v = a[:, 1], a[:, 2], a[:, 3], a[:, 4], a[:, 5]
         self.n = len(a)
-        self.crypto = is_crypto_symbol(symbol)
-        self.hs = (costs.crypto_half_spread_bps if self.crypto else costs.stock_half_spread_bps) / 1e4
-        self.fee = costs.crypto_fee_bps / 1e4 if self.crypto else 0.0
+        self.hs = costs.stock_half_spread_bps / 1e4
+        self.fee = 0.0
         self._ctx: Dict[int, tuple] = {}
         self._entry: Dict[tuple, bool] = {}
         # Stocks: minutes to the 16:00 close at the end of each bar, and the last
         # bar of each day present in the data (a half-day or a data gap).
         self.mins_to_close = np.full(self.n, np.inf)
         self.day_last = np.zeros(self.n, dtype=bool)
-        if not self.crypto:
-            days = []
-            for i, m in enumerate(self.minute):
-                t = datetime.fromtimestamp(int(m) * 60, tz=NY)
-                self.mins_to_close[i] = 16 * 60 - (t.hour * 60 + t.minute + 1)
-                days.append(t.date())
-            for i in range(self.n):
-                self.day_last[i] = i == self.n - 1 or days[i + 1] != days[i]
-            self.day = days
+        days = []
+        for i, m in enumerate(self.minute):
+            t = datetime.fromtimestamp(int(m) * 60, tz=NY)
+            self.mins_to_close[i] = 16 * 60 - (t.hour * 60 + t.minute + 1)
+            days.append(t.date())
+        for i in range(self.n):
+            self.day_last[i] = i == self.n - 1 or days[i + 1] != days[i]
+        self.day = days
 
     def ctx(self, i: int):
         """(StrategyContext, TrendRead) at the close of bar i."""
@@ -167,7 +159,7 @@ class Tape:
         ctx = StrategyContext(
             symbol=self.symbol, price=price, quant=quant,
             sentiment=SentimentRecord(stock_id=self.symbol, headline="(backtest: no news history)"),
-            consensus=None, is_crypto=self.crypto,
+            consensus=None,
             series=PriceSeries(prices, vols))
         ctx._min_buy_prob = state.risk_profile.min_buy_prob
         trend = analyze(self.symbol, closes=self.c[max(0, i - TREND_WINDOW + 1):i + 1], daily=None)
@@ -181,7 +173,7 @@ class Tape:
         if hit is not None:
             return hit
         ok = False
-        if self.crypto or self.mins_to_close[i] > settings.NO_NEW_ENTRY_MINUTES_BEFORE_CLOSE:
+        if self.mins_to_close[i] > settings.NO_NEW_ENTRY_MINUTES_BEFORE_CLOSE:
             ctx, tr = self.ctx(i)
             if tr.ready and not tr.reversal_down and tr.direction >= settings.TREND_ENTRY_MIN:
                 try:
@@ -281,8 +273,6 @@ def _soft_reversal(tape: Tape, i: int, b: Book, ctx, tr) -> bool:
 
 
 def _in_min_hold(tape: Tape, i: int, b: Book) -> bool:
-    if tape.crypto:
-        return False
     return (tape.minute[i] * 60 - b.pos["opened_at"]) / 60 < settings.STOCK_SCORE_MIN_HOLD_MINUTES
 
 
@@ -292,7 +282,7 @@ def _bar(tape: Tape, i: int, b: Book, strat) -> Optional[Trade]:
     hs = tape.hs
 
     # End of day: stocks are flat before the close.
-    if not tape.crypto and settings.DAY_TRADE_FLATTEN_ENABLED and (
+    if settings.DAY_TRADE_FLATTEN_ENABLED and (
             tape.mins_to_close[i] <= settings.FLATTEN_MINUTES_BEFORE_CLOSE or tape.day_last[i]):
         return b.close(i, c, "end of day")
 
@@ -314,14 +304,12 @@ def _bar(tape: Tape, i: int, b: Book, strat) -> Optional[Trade]:
             return b.close(i, stop, "stop")
 
     # Profit harvest at the first price where the bid beats the reference: the
-    # entry (plus both crypto fees, as engine/profit_harvest.py requires), the
-    # last harvest, or the USD minimum. Stocks sell fractional shares.
+    # entry, the last harvest, or the USD minimum. Stocks sell fractional shares.
     if settings.PROFIT_HARVEST_ENABLED and not b.pos.get("harvest_unsplittable"):
-        fee = settings.CRYPTO_TAKER_FEE_BPS / 1e4 if tape.crypto else 0.0
-        ref = max(entry * (1 + fee) / (1 - fee), b.last_harvest_bid)
+        ref = max(entry, b.last_harvest_bid)
         if settings.PROFIT_HARVEST_USD > 0:
             ref = max(ref, entry + settings.PROFIT_HARVEST_USD / b.qty)
-        tick = 0.01 if not tape.crypto else ref * 1e-4
+        tick = 0.01
         if h * (1 - hs) > ref:
             bid = min(max(o * (1 - hs), ref + tick), h * (1 - hs))
             frac = min(max(settings.PROFIT_HARVEST_FRACTION, 0.0), 1.0)
@@ -335,10 +323,10 @@ def _bar(tape: Tape, i: int, b: Book, strat) -> Optional[Trade]:
                 b.reduce(sell, bid / (1 - hs), harvest=True)
                 b.last_harvest_bid = bid
 
-    # Target: a limit at the take-profit (the bracket leg, or the sentinel for crypto).
+    # Target: a limit at the take-profit (the bracket leg).
     tp = float(b.pos["take_profit"])
     if h >= tp:
-        return b.close(i, max(o, tp), "target", at_limit=not tape.crypto)
+        return b.close(i, max(o, tp), "target", at_limit=True)
 
     # From here on, decisions made at the bar's close.
     ctx, tr = tape.ctx(i)
@@ -352,7 +340,7 @@ def _bar(tape: Tape, i: int, b: Book, strat) -> Optional[Trade]:
         b.pos["stop_loss"] = lock
 
     pctx = StrategyContext(symbol=ctx.symbol, price=c, quant=ctx.quant, sentiment=ctx.sentiment,
-                           consensus=None, is_crypto=ctx.is_crypto, position=b.pos,
+                           consensus=None, position=b.pos,
                            highest_price=b.highest, series=ctx.series)
     pctx._min_buy_prob = ctx._min_buy_prob
     try:
@@ -411,7 +399,7 @@ def run(tape: Tape, strat, notional: float, collect_features: bool = False) -> L
     for i in range(WARMUP, tape.n):
         if pending:
             pending = False
-            fresh_day = (not tape.crypto) and tape.day_last[i - 1]
+            fresh_day = tape.day_last[i - 1]
             if not fresh_day:
                 book = Book(tape, strat.name, i, float(tape.o[i]), notional)
                 if book.qty <= 0:

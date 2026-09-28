@@ -2,7 +2,7 @@
 Historical one-minute bars for the backtester, from Alpaca, cached on disk.
 
 Stocks come from the IEX feed (the free plan), regular session only, since the
-platform day-trades and flattens before the close. Crypto trades 24/7. Each
+platform day-trades and flattens before the close. Each
 symbol and day range is cached as CSV under backtest/output/bars/, so a rerun with other
 settings replays the same data without another download.
 """
@@ -37,13 +37,9 @@ def _fetch(symbol: str, start: datetime, end: datetime) -> List[Bar]:
     """Alpaca market-data REST API, paged. Stocks from IEX (the free plan)."""
     import requests
     from core.config import settings
-    crypto = "/" in symbol
-    url = ("https://data.alpaca.markets/v1beta3/crypto/us/bars" if crypto
-           else "https://data.alpaca.markets/v2/stocks/bars")
-    params = {"symbols": symbol, "timeframe": "1Min", "limit": 10000,
+    url = "https://data.alpaca.markets/v2/stocks/bars"
+    params = {"symbols": symbol, "timeframe": "1Min", "limit": 10000, "feed": "iex",
               "start": start.strftime("%Y-%m-%dT%H:%M:%SZ"), "end": end.strftime("%Y-%m-%dT%H:%M:%SZ")}
-    if not crypto:
-        params["feed"] = "iex"
     headers = {"APCA-API-KEY-ID": settings.ALPACA_API_KEY,
                "APCA-API-SECRET-KEY": settings.ALPACA_SECRET_KEY}
     bars: List[Bar] = []
@@ -60,8 +56,7 @@ def _fetch(symbol: str, start: datetime, end: datetime) -> List[Bar]:
         if not token:
             break
         params["page_token"] = token
-    if not crypto:
-        bars = [b for b in bars if in_regular_session(b[0])]
+    bars = [b for b in bars if in_regular_session(b[0])]
     return sorted(set(bars))
 
 

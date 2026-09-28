@@ -450,9 +450,6 @@ class PositionSentinelBot:
 
     def _in_min_hold(self, pos: Dict[str, Any]) -> bool:
         """True while an equity position is younger than the stock minimum hold."""
-        from core.state import is_crypto_symbol
-        if is_crypto_symbol(self.symbol):
-            return False
         opened_at = pos.get("opened_at")
         if not opened_at:
             return False

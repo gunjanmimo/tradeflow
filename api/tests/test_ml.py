@@ -52,9 +52,6 @@ def test_experience_records_the_whole_net_result(tmp_path, monkeypatch):
     assert len(open(tmp_path / "e.jsonl").read().splitlines()) == 1
 
 
-def test_crypto_result_is_net_of_fees():
-    r = exp_mod.net_result({"invested_dollars": 1000.0}, 4.0, crypto=True)
-    assert r["net_pnl"] == pytest.approx(4.0 - 0.0025 * 2004.0)
 
 
 def _planted(n=1200, seed=1):

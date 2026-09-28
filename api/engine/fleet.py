@@ -25,7 +25,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from core.config import settings
-from core.state import state, TradeDecision, is_crypto_symbol
+from core.state import state, TradeDecision
 from core.minute_bars import minute_bars
 from engine.trend import board as trend_board, analyze
 
@@ -230,7 +230,7 @@ class PositionManagerAgent(Agent):
         r_mult = (price - entry) / risk_ps if risk_ps > 0 else 0.0
 
         in_min_hold = False
-        if not is_crypto_symbol(sym) and pos.get("opened_at"):
+        if pos.get("opened_at"):
             in_min_hold = (time.time() - float(pos["opened_at"])) / 60 < settings.STOCK_SCORE_MIN_HOLD_MINUTES
         trend_txt = f"trend {r.label} {r.direction:+.2f} (conf {r.confidence:.2f})"
 

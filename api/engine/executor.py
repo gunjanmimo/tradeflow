@@ -62,6 +62,8 @@ class AlpacaExecutor:
         # symbol -> the broker's own mark for a held position, from the last sync.
         self.broker_marks: Dict[str, float] = {}
         self._remark_logged: set[str] = set()
+        # Non-equity symbols already reported as ignored by the position sync.
+        self._foreign_logged: set[str] = set()
         # symbol -> the PriceTick object remark_stale_positions last injected
         self._remark_tick: Dict[str, Any] = {}
         self._mark_task: Optional[asyncio.Task] = None
@@ -82,8 +84,7 @@ class AlpacaExecutor:
 
         # --- Unfilled-order tracking ---
         # A submitted order is not a position until it fills. Previously nothing
-        # tracked the gap: an order that never filled (measured: HYPE/USD on
-        # Alpaca paper, 0 fills ever) left no position, so the next signal
+        # tracked the gap: an order that never filled left no position, so the next signal
         # submitted another one -- 27 stacked orders held ~all the cash.
         # symbol -> [{id, side, submitted_at, client_order_id}], refreshed each sync
         self.open_orders: Dict[str, list] = {}
@@ -147,7 +148,7 @@ class AlpacaExecutor:
         until = self.cooldown_until.get(symbol)
         if until and now < until:
             return (f"{symbol} is on cooldown for {(until - now) / 60:.0f} more min: a previous "
-                    f"order sat unfilled for {settings.STALE_ORDER_SECONDS:.0f}s and was cancelled")
+                    f"order sat unfilled and was cancelled")
         if any(o["side"] == "buy" for o in self.open_orders.get(symbol, ())):
             return f"{symbol} already has an unfilled BUY order at the broker"
         if symbol in self.awaiting_fill:
@@ -157,36 +158,19 @@ class AlpacaExecutor:
     def _sync_open_orders(self, filled_symbols: set):
         """
         Refreshes open broker orders, clears awaiting-fill markers, and cancels
-        this engine's own crypto BUY orders that have sat unfilled too long.
+        this engine's own pre-market limit buys that have sat unfilled too long.
         Runs inside the sync thread, never on the event loop.
         """
         from alpaca.trading.requests import GetOrdersRequest
         from alpaca.trading.enums import QueryOrderStatus
-        from core.state import is_crypto_symbol
         orders = self.trading_client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500))
         now = time.time()
         by_symbol: Dict[str, list] = {}
         for o in orders:
             sym = o.symbol
-            if sym.endswith("USD") and "/" not in sym and len(sym) > 3 and is_crypto_symbol(sym[:-3] + "/USD"):
-                sym = sym[:-3] + "/USD"
             side = "buy" if "BUY" in str(o.side).upper() else "sell"
             submitted = o.submitted_at.timestamp() if o.submitted_at else now
             coid = o.client_order_id or ""
-            # Crypto trades 24/7, so a market order should fill in seconds. Only
-            # orders this engine placed (client_order_id "tf-") are cancelled;
-            # equities are exempt because a queued after-hours order is normal.
-            if (side == "buy" and coid.startswith(ORDER_ID_PREFIX) and is_crypto_symbol(sym)
-                    and now - submitted > settings.STALE_ORDER_SECONDS):
-                try:
-                    self.trading_client.cancel_order_by_id(o.id)
-                    self.cooldown_until[sym] = now + settings.UNFILLED_COOLDOWN_SECONDS
-                    state.log_event("ORDER_STALE",
-                        f"Cancelled unfilled BUY {sym} after {now - submitted:.0f}s; no new "
-                        f"{sym} buys for {settings.UNFILLED_COOLDOWN_SECONDS / 60:.0f} min")
-                    continue
-                except Exception as e:
-                    logger.warning(f"Could not cancel stale order {o.id} for {sym}: {e}")
             if (side == "buy" and coid in self.extended_order_ids
                     and now - submitted > settings.PREMARKET_STALE_ORDER_SECONDS):
                 try:
@@ -209,9 +193,7 @@ class AlpacaExecutor:
     def is_symbol_tradable(self, symbol: str) -> bool:
         if self.is_mock_mode:
             return True
-        sym = symbol.upper().strip()
-        clean = sym.replace("/", "")
-        return sym in self.alpaca_tradable_symbols or clean in self.alpaca_tradable_symbols
+        return symbol.upper().strip() in self.alpaca_tradable_symbols
 
     async def initialize(self):
         """Initializes Alpaca TradingClient using official alpaca-py"""
@@ -236,9 +218,10 @@ class AlpacaExecutor:
             
             def load_assets():
                 try:
-                    assets = self.trading_client.get_all_assets()
-                    state.fractionable_symbols = {a.symbol for a in assets
-                                                  if a.tradable and getattr(a, "fractionable", False)}
+                    from alpaca.trading.requests import GetAssetsRequest
+                    from alpaca.trading.enums import AssetClass
+                    assets = self.trading_client.get_all_assets(
+                        GetAssetsRequest(asset_class=AssetClass.US_EQUITY))
                     return {a.symbol for a in assets if a.tradable}
                 except Exception as ex:
                     logger.debug(f"Could not load asset catalog: {ex}")
@@ -254,8 +237,6 @@ class AlpacaExecutor:
                     for o in reversed(orders):
                         if o.filled_at and o.filled_avg_price:
                             sym = o.symbol
-                            if sym.endswith("USD") and "/" not in sym and len(sym) > 3:
-                                sym = sym[:-3] + "/USD"
                             side_str = "BUY" if "BUY" in str(o.side).upper() else "SELL"
                             recent.append({
                                 "time": o.filled_at.timestamp(),
@@ -301,12 +282,15 @@ class AlpacaExecutor:
             positions = self.trading_client.get_all_positions()
             new_positions = {}
             for pos in positions:
-                sym = pos.symbol
-                # Normalize crypto symbols: e.g. "BTCUSD" -> "BTC/USD"
-                if sym.endswith("USD") and "/" not in sym and len(sym) > 3:
-                    normalized_sym = sym[:-3] + "/USD"
-                else:
-                    normalized_sym = sym
+                # US equities only. Anything else in the account (e.g. crypto left
+                # over from before crypto was removed) is not the engine's to manage.
+                if "EQUITY" not in str(getattr(pos, "asset_class", "us_equity")).upper():
+                    if pos.symbol not in self._foreign_logged:
+                        self._foreign_logged.add(pos.symbol)
+                        state.log_event("ORDER_SYNC", f"Ignoring non-equity position {pos.symbol} "
+                                                      f"({pos.asset_class}); close it at the broker.")
+                    continue
+                normalized_sym = pos.symbol
 
                 old_pos = state.active_positions.get(normalized_sym, {})
                 qty = float(pos.qty)
@@ -537,10 +521,7 @@ class AlpacaExecutor:
             }
 
             t0 = time.time()
-            is_alpaca_tradable = (
-                symbol in self.alpaca_tradable_symbols or 
-                symbol.replace("/", "") in self.alpaca_tradable_symbols
-            )
+            is_alpaca_tradable = symbol in self.alpaca_tradable_symbols
 
             if self.is_mock_mode or not is_alpaca_tradable:
                 mode_tag = "SIMULATED" if self.is_mock_mode else "PAPER_SIMULATED"
@@ -584,24 +565,14 @@ class AlpacaExecutor:
                 MarketOrderRequest, LimitOrderRequest, TakeProfitRequest, StopLossRequest,
             )
             from alpaca.trading.enums import OrderSide, TimeInForce
-            from core.state import is_crypto_symbol
             from core.market_hours import us_session, PRE
 
             # Tagged so the engine can tell its own orders from manual ones.
             client_order_id = f"{ORDER_ID_PREFIX}{uuid.uuid4().hex[:20]}"
-            if is_crypto_symbol(symbol):
-                # Crypto uses direct GTC market order (stop-loss and take-profit managed in-engine)
-                req = MarketOrderRequest(
-                    symbol=symbol,
-                    qty=qty,
-                    side=OrderSide.BUY,
-                    time_in_force=TimeInForce.GTC,
-                    client_order_id=client_order_id,
-                )
-            elif us_session() == PRE:
+            if us_session() == PRE:
                 # Pre-market: Alpaca takes only DAY limit orders flagged
                 # extended_hours, with no bracket legs. The sentinel enforces the
-                # stop and target in-engine, as it does for crypto. Half size and
+                # stop and target in-engine. Half size and
                 # whole shares: the book is thin and fractional extended-hours
                 # orders are not guaranteed.
                 whole = math.floor(qty * settings.PREMARKET_SIZE_FACTOR)
@@ -731,14 +702,10 @@ class AlpacaExecutor:
             return
 
         try:
-            from core.state import is_crypto_symbol
-            # Alpaca API expects 'BTCUSD' instead of 'BTC/USD' for position closing route
-            alpaca_sym = symbol.replace("/", "") if is_crypto_symbol(symbol) else symbol
-            
             loop = asyncio.get_running_loop()
             t_cl = time.perf_counter_ns()
             from core.market_hours import us_session, PRE, POST
-            if not is_crypto_symbol(symbol) and us_session() in (PRE, POST):
+            if us_session() in (PRE, POST):
                 # close_position sends a market order, which Alpaca rejects outside
                 # regular hours. Exit with a marketable extended-hours limit instead.
                 ref = float(pos.get("current_price") or pos["avg_entry_price"])
@@ -762,9 +729,8 @@ class AlpacaExecutor:
             # An equity bought with a bracket still has its stop and target legs
             # open, and they hold every share: close_position then fails with
             # "qty must be > 0". Clear the symbol's orders first.
-            if not is_crypto_symbol(symbol):
-                await loop.run_in_executor(None, self._cancel_open_orders, symbol)
-            await loop.run_in_executor(None, self.trading_client.close_position, alpaca_sym)
+            await loop.run_in_executor(None, self._cancel_open_orders, symbol)
+            await loop.run_in_executor(None, self.trading_client.close_position, symbol)
             latency.record_ns("order_close", t_cl)
             self.close_retry_after.pop(symbol, None)
             self.close_failures.pop(symbol, None)
@@ -815,19 +781,12 @@ class AlpacaExecutor:
 
     @staticmethod
     def _round_qty(symbol: str, qty: float, price: float) -> float:
-        """Rounds DOWN to a tradable quantity: whole shares, or crypto precision."""
-        from core.state import is_crypto_symbol, qty_decimals
-        if is_crypto_symbol(symbol):
-            d = qty_decimals(price)
-            return math.floor(qty * 10 ** d) / 10 ** d
+        """Rounds DOWN to a tradable quantity: whole shares."""
         return float(math.floor(qty))
 
     def _session_blocks(self, symbol: str) -> Optional[str]:
         """Partial sells and adds are market orders: stocks only in regular hours."""
-        from core.state import is_crypto_symbol
         from core.market_hours import us_session, REGULAR
-        if is_crypto_symbol(symbol):
-            return None
         s = us_session()
         return None if s == REGULAR else f"US market is {s}: partial orders wait for regular hours"
 
@@ -836,7 +795,7 @@ class AlpacaExecutor:
         Sells decision.fraction of a position. For a stock bought with a bracket,
         the bracket legs hold every share, so they are cancelled first and the
         remainder's stop and target are enforced in-engine by its sentinel (as
-        for crypto and pre-market buys). A trim that would leave nothing, or sell
+        for pre-market buys). A trim that would leave nothing, or sell
         nothing, becomes a full CLOSE or is skipped.
         """
         symbol = decision.symbol
@@ -858,7 +817,7 @@ class AlpacaExecutor:
             if sell <= 0 or qty - sell <= 1e-9:
                 pos["harvest_unsplittable"] = True
                 return
-            # Priced at the bid, where the sell fills, and net of crypto fees:
+            # Priced at the bid, where the sell fills:
             # what is booked as income must be real profit.
             price = profit_harvest.sell_price(symbol, price)
             unit = profit_harvest.net_unit_profit(symbol, price, float(pos["avg_entry_price"]))
@@ -886,15 +845,12 @@ class AlpacaExecutor:
             if not (self.is_mock_mode or pos.get("mode") in ("SIMULATED", "PAPER_SIMULATED")):
                 from alpaca.trading.requests import MarketOrderRequest
                 from alpaca.trading.enums import OrderSide, TimeInForce
-                from core.state import is_crypto_symbol
                 loop = asyncio.get_running_loop()
-                crypto = is_crypto_symbol(symbol)
-                if not crypto:
-                    await loop.run_in_executor(None, self._cancel_open_orders, symbol)
-                    pos["brackets_in_engine"] = True
+                await loop.run_in_executor(None, self._cancel_open_orders, symbol)
+                pos["brackets_in_engine"] = True
                 await loop.run_in_executor(None, self.trading_client.submit_order, MarketOrderRequest(
                     symbol=symbol, qty=sell, side=OrderSide.SELL,
-                    time_in_force=TimeInForce.GTC if crypto else TimeInForce.DAY,
+                    time_in_force=TimeInForce.DAY,
                     client_order_id=f"{ORDER_ID_PREFIX}{uuid.uuid4().hex[:20]}"))
                 loop.run_in_executor(None, self.sync_account_and_positions)
             else:
@@ -939,7 +895,6 @@ class AlpacaExecutor:
         add is a plain market order: the original bracket legs cover only the
         first shares, so the sentinel enforces the stop on the rest in-engine.
         """
-        from core.state import is_crypto_symbol
         from engine.diversification import diversification
         from core.market_filter import market_filter
         symbol = decision.symbol
@@ -971,10 +926,10 @@ class AlpacaExecutor:
                 base * profile.max_position_notional_pct / 100.0 - qty * price,
                 diversification.assess(symbol).headroom_dollars,
                 state.remaining_budget / (1 + settings.BUDGET_FILL_BUFFER_PCT / 100.0),
-                state.bot_cash * (0.95 if is_crypto_symbol(symbol) else 1.0) - 5.0]
+                state.bot_cash - 5.0]
         dollars = min(room)
         add = self._round_qty(symbol, dollars / price, price) if dollars > 0 else 0.0
-        if add <= 0 or add * price < (15.0 if is_crypto_symbol(symbol) else 30.0):
+        if add <= 0 or add * price < 30.0:
             return
 
         self.pending_orders.add(symbol)
@@ -985,11 +940,10 @@ class AlpacaExecutor:
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, self.trading_client.submit_order, MarketOrderRequest(
                     symbol=symbol, qty=add, side=OrderSide.BUY,
-                    time_in_force=TimeInForce.GTC if is_crypto_symbol(symbol) else TimeInForce.DAY,
+                    time_in_force=TimeInForce.DAY,
                     client_order_id=f"{ORDER_ID_PREFIX}{uuid.uuid4().hex[:20]}"))
                 loop.run_in_executor(None, self.sync_account_and_positions)
-                if not is_crypto_symbol(symbol):
-                    pos["brackets_in_engine"] = True
+                pos["brackets_in_engine"] = True
             state.account_info["cash"] = max(0.0, state.account_info["cash"] - round(add * price, 2))
             # Reflect the add at once so the budget and the sentinel see it before
             # the broker sync lands with the exact fill.
@@ -1210,10 +1164,7 @@ class AlpacaExecutor:
                 if self.trading_client and any(self._feed_is_stale(s, now) for s in live):
                     positions = await loop.run_in_executor(None, self.trading_client.get_all_positions)
                     for p in positions:
-                        sym = p.symbol
-                        if sym.endswith("USD") and "/" not in sym and len(sym) > 3:
-                            sym = sym[:-3] + "/USD"
-                        self.broker_marks[sym] = float(p.current_price)
+                        self.broker_marks[p.symbol] = float(p.current_price)
                     await self.remark_stale_positions()
             except asyncio.CancelledError:
                 break

@@ -23,7 +23,6 @@ class MeanReversionStrategy(Strategy):
         "when the longer-term trend has actually broken down. Exits on reversion to "
         "the mean rather than on trend continuation."
     )
-    applies_to = "any"
     requires_sentiment = False
 
     params = {

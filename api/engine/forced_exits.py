@@ -13,7 +13,7 @@ and on its one-second heartbeat, and both bypass the equity minimum hold.
   end of day    This is a day-trading platform. A stock is closed
                 FLATTEN_MINUTES_BEFORE_CLOSE before the market it trades on
                 closes, and, if that window was missed, as soon as the after-hours
-                session lets an exit through. Crypto has no close.
+                session lets an exit through.
 
 Each returns a human-readable reason when the position must close, else None.
 """
@@ -21,7 +21,7 @@ import time
 from typing import Any, Dict, Optional
 
 from core.config import settings
-from core.state import state, is_crypto_symbol
+from core.state import state
 
 
 def stale_price_exit(symbol: str, pnl_pct: float, since: float,
@@ -46,7 +46,7 @@ def stale_price_exit(symbol: str, pnl_pct: float, since: float,
 
 
 def end_of_day_exit(symbol: str) -> Optional[str]:
-    if not settings.DAY_TRADE_FLATTEN_ENABLED or is_crypto_symbol(symbol):
+    if not settings.DAY_TRADE_FLATTEN_ENABLED:
         return None
     from core.market_hours import us_session, minutes_to_close, POST
     if us_session() == POST:

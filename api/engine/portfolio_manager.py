@@ -28,7 +28,7 @@ from collections import Counter, deque
 from typing import Any, Dict, List, Optional
 
 from core.config import settings
-from core.state import state, is_crypto_symbol
+from core.state import state
 from engine.decision_engine import decision_engine
 from engine.risk_guard import risk_guard
 from core.universe import universe
@@ -145,7 +145,7 @@ class PortfolioManager:
                 continue
             tick = state.latest_prices.get(sym)
             row: Dict[str, Any] = {
-                "symbol": sym, "crypto": is_crypto_symbol(sym), "price": None,
+                "symbol": sym, "price": None,
                 "chg_1m_pct": None, "chg_5m_pct": None,
                 "price_age_s": None, "tick_age_s": None, "status": "", "verdict": "",
             }
@@ -165,14 +165,13 @@ class PortfolioManager:
                 row["status"] = status
                 blocked[label or status] += 1
 
-            if not is_crypto_symbol(sym):
-                if session not in (REGULAR, PRE):
-                    skip("market closed", "stock market closed")
-                    continue
-                mins = minutes_to_close(sym)
-                if mins is not None and mins <= cutoff:
-                    skip("near close", "too close to the market close")
-                    continue
+            if session not in (REGULAR, PRE):
+                skip("market closed", "stock market closed")
+                continue
+            mins = minutes_to_close(sym)
+            if mins is not None and mins <= cutoff:
+                skip("near close", "too close to the market close")
+                continue
             if tick is None:
                 skip("no price", "no price yet")
                 continue
@@ -242,7 +241,7 @@ class PortfolioManager:
                                                 state.strategy_overrides).name
         ready = [c for c in cands if c["ml_bars"] is not None]
         scores = scorer.score([{"bars": c["ml_bars"], "strategy": c["ml_strategy"],
-                                "crypto": is_crypto_symbol(c["symbol"])} for c in ready]) if ready else None
+                                "crypto": False} for c in ready]) if ready else None
         for c, sc in zip(ready, scores or []):
             c["ml"] = sc
         latency.record_ns("ml_score", t0)
@@ -339,7 +338,8 @@ class PortfolioManager:
                     break
                 best = ranked[0]
                 sym = best["symbol"]
-                if state.remaining_budget < (15.0 if is_crypto_symbol(sym) else 30.0):
+                from engine.risk_guard import MIN_ORDER_DOLLARS
+                if state.remaining_budget < MIN_ORDER_DOLLARS:
                     break
                 self._attempted[sym] = time.time()
                 state.log_event(
@@ -358,7 +358,7 @@ class PortfolioManager:
                     if settings.ML_MODE != "off":
                         from ml.experience import experience
                         experience.on_entry(sym, best.get("ml_bars"), best.get("ml_strategy") or "",
-                                            is_crypto_symbol(sym), best.get("ml"))
+                                            False, best.get("ml"))
                     self.last_entry = {"symbol": sym, "at": time.time(), "score": best["score"],
                                        "sector": best["sector"], "region": best["region"]}
                 # The book changed (or the entry was refused): re-rank the rest.
@@ -402,7 +402,7 @@ class PortfolioManager:
         elif slots <= 0:
             st, msg = "full", (f"All {profile.max_concurrent_positions} position slots are used at risk dial "
                                f"{profile.factor}; ${idle:,.2f} idle cannot be deployed until one closes.")
-        elif idle < 15.0:
+        elif idle < 30.0:
             st, msg = "full", f"Budget fully committed (${idle:,.2f} left)."
         elif ranked:
             st, msg = "active", f"{len(ranked)} entries ranked; the best goes in next cycle."

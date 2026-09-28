@@ -19,9 +19,8 @@ class Settings(BaseSettings):
     STOP_LOSS_ATR_MULTIPLE: float = 1.5   # Stop loss at 1.5 * ATR
     TAKE_PROFIT_ATR_MULTIPLE: float = 3.0 # Take profit at 3.0 * ATR (1:2 Risk/Reward)
 
-    # Stop-distance bounds, as a fraction of price. Both are relative, never absolute
-    # dollar amounts -- an absolute floor is meaningless across assets priced from
-    # $0.00002 (SHIB) to $85,000 (BTC).
+    # Stop-distance bounds, as a fraction of price. Relative, never absolute dollar
+    # amounts, so a $5 stock and a $900 stock get comparable stops.
     MIN_STOP_DISTANCE_PCT: float = 0.008  # never risk a stop tighter than 0.8%
     MAX_STOP_DISTANCE_PCT: float = 0.06   # never accept a stop wider than 6%
     MAX_POSITION_NOTIONAL_PCT: float = 0.15  # max 15% of budget in one position
@@ -32,7 +31,6 @@ class Settings(BaseSettings):
     # Portfolio-level circuit breakers (evaluated before every new entry)
     MAX_DAILY_LOSS_PERCENT: float = 3.0   # halt new entries after -3% on the day
     MAX_DRAWDOWN_PERCENT: float = 10.0    # halt new entries after -10% from peak equity
-    MAX_POSITIONS_PER_ASSET_CLASS: int = 3  # cap correlated exposure (e.g. 5 L1 tokens)
 
     # Signal freshness: a sentiment score older than this is not tradeable.
     # Without a TTL a score from hours ago is read as current on every tick.
@@ -160,7 +158,6 @@ class Settings(BaseSettings):
     STOCK_SCORE_MIN_ENTRY: float = 0.62
     STOCK_SCORE_EXIT_BELOW: float = 0.40
     # No discretionary (score/news) exit before this; stops and targets still apply.
-    # Stops the enter-and-flip churn that cost the crypto bots today.
     STOCK_SCORE_MIN_HOLD_MINUTES: float = 30.0
 
     # --- US pre-market (04:00-09:30 NY) ---
@@ -208,7 +205,7 @@ class Settings(BaseSettings):
     # --- Day trading: nothing is held through the close ---
     # Stocks are flattened this long before their market closes (the broker clock's
     # own close time, so half-days are respected) and get no new entries inside
-    # NO_NEW_ENTRY_MINUTES_BEFORE_CLOSE. Crypto has no close and is exempt.
+    # NO_NEW_ENTRY_MINUTES_BEFORE_CLOSE.
     DAY_TRADE_FLATTEN_ENABLED: bool = True
     FLATTEN_MINUTES_BEFORE_CLOSE: float = 10.0
     NO_NEW_ENTRY_MINUTES_BEFORE_CLOSE: float = 30.0
@@ -262,9 +259,6 @@ class Settings(BaseSettings):
     # winner sells 0.5), down to this many decimals and at least this notional.
     HARVEST_FRACTION_DECIMALS: int = 4
     HARVEST_MIN_FRACTIONAL_NOTIONAL: float = 1.0
-    # Crypto: Alpaca's taker fee, paid on the buy and on the harvest sell. A
-    # crypto harvest needs the profit to clear both, or it books a loss as income.
-    CRYPTO_TAKER_FEE_BPS: float = 25.0
     SCALE_IN_ENABLED: bool = True
     SCALE_IN_DIRECTION: float = 0.50    # add to a winner only in a strong, confident uptrend
     SCALE_IN_MIN_R: float = 1.0         # ...already up at least 1x its initial risk
@@ -283,10 +277,6 @@ class Settings(BaseSettings):
     STOP_DISASTER_EXTRA_R: float = 0.5
     RECOVERY_ENABLED: bool = True
     RECOVERY_ADD_ENABLED: bool = True
-    # Off for crypto: the 2026-09 backtest (python -m backtest) showed rescue adds
-    # losing ~$4.5k over a week on crypto, as each add pays the taker fee again
-    # and doubles into the losers. On stocks it was neutral.
-    RECOVERY_ADD_CRYPTO: bool = False
     RECOVERY_ADD_MIN_R: float = 0.4       # rescue only once down at least this x the stop distance
     RECOVERY_ADD_MAX_R: float = 0.8       # ...and not this close to the stop
     RECOVERY_ADD_FRACTION: float = 0.5    # add at most this share of the current quantity
@@ -307,12 +297,6 @@ class Settings(BaseSettings):
 
     # --- Curator: moves discovery's best picks onto the watchlist ---
     CURATOR_INTERVAL_SECONDS: float = 30.0
-
-    # --- Unfilled orders ---
-    # A crypto market order still open after this long is treated as unfillable,
-    # cancelled (engine-placed orders only) and the symbol put on cooldown.
-    STALE_ORDER_SECONDS: float = 60.0
-    UNFILLED_COOLDOWN_SECONDS: float = 3600.0
 
     # Server Settings
     HOST: str = "0.0.0.0"

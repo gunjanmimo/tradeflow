@@ -1,25 +1,9 @@
 """
 Strategy interface.
 
-Why per-asset-class strategies
-------------------------------
-A single strategy was applied to everything, and it required Laya sentiment for
-every entry. That works for equities, where Alpaca's news feed is dense, and fails
-completely for alt-coins, where real coverage is sparse -- measured live, 1 of 26
-watchlist symbols had a fresh headline, so a sentiment-gated engine produced zero
-tradeable signals.
-
-Different asset classes carry different information:
-
-  * Equities trade around discrete catalysts (earnings, verdicts, guidance) during
-    fixed hours, and real news is available. Sentiment is the primary edge.
-  * Crypto trades continuously with no earnings calendar and thin per-asset news.
-    Price structure and volume are the primary edge; sentiment is best used as a
-    VETO (do not buy into clearly bad news) rather than as a requirement.
-
-So a strategy declares what it needs, and the registry assigns strategies per
-asset class. A strategy that cannot get its inputs abstains with a stated reason
-instead of trading on a default.
+A strategy decides entries and discretionary exits for US equities from a
+StrategyContext. A strategy that cannot get its inputs abstains with a stated
+reason instead of trading on a default.
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -56,7 +40,6 @@ class StrategyContext:
     quant: Any                       # QuantMetrics
     sentiment: Any                   # SentimentRecord
     consensus: Optional[float]       # None when no real source covered this symbol
-    is_crypto: bool
     position: Optional[Dict[str, Any]] = None
     highest_price: Optional[float] = None
     # Price/volume history with memoised indicators (engine.strategies.indicators).
@@ -74,8 +57,6 @@ class Strategy(ABC):
     name: str = "base"
     display_name: str = "Base"
     description: str = ""
-    # Which asset classes this strategy is valid for: "crypto", "equity", or "any"
-    applies_to: str = "any"
     # True when the strategy cannot function without fresh, agreeing sentiment.
     requires_sentiment: bool = False
 
@@ -146,7 +127,6 @@ class Strategy(ABC):
             "name": self.name,
             "display_name": self.display_name,
             "description": self.description,
-            "applies_to": self.applies_to,
             "requires_sentiment": self.requires_sentiment,
             "regimes": list(self.regimes),
             "source": self.source,

@@ -18,34 +18,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Set
 
 from core.config import settings
-from core.state import state, ScoredHeadline, is_crypto_symbol
+from core.state import state, ScoredHeadline
 from sentiment.router import sentiment_service
 
 logger = logging.getLogger("tradeflow.news")
-
-# Alpaca's news endpoint indexes equities. Crypto headlines are keyed to the base
-# asset name, so map the pair to terms that appear in real coverage.
-CRYPTO_NEWS_KEYS = {
-    "BTC/USD": ("BTCUSD", "bitcoin"),
-    "ETH/USD": ("ETHUSD", "ethereum"),
-    "SOL/USD": ("SOLUSD", "solana"),
-    "DOGE/USD": ("DOGEUSD", "dogecoin"),
-    "XRP/USD": ("XRPUSD", "xrp"),
-    "ADA/USD": ("ADAUSD", "cardano"),
-    "AVAX/USD": ("AVAXUSD", "avalanche"),
-    "LINK/USD": ("LINKUSD", "chainlink"),
-    "LTC/USD": ("LTCUSD", "litecoin"),
-    "BCH/USD": ("BCHUSD", "bitcoin cash"),
-    "UNI/USD": ("UNIUSD", "uniswap"),
-    "SHIB/USD": ("SHIBUSD", "shiba"),
-    "TRX/USD": ("TRXUSD", "tron"),
-    "XLM/USD": ("XLMUSD", "stellar"),
-    "HBAR/USD": ("HBARUSD", "hedera"),
-    "NEAR/USD": ("NEARUSD", "near protocol"),
-    "SUI/USD": ("SUIUSD", "sui"),
-    "BNB/USD": ("BNBUSD", "binance coin"),
-}
-
 
 class NewsFeedManager:
     """
@@ -105,14 +81,13 @@ class NewsFeedManager:
     # Ingestion
     # ------------------------------------------------------------------
     def _equity_symbols(self) -> List[str]:
-        return [s for s in self._tracked() if not is_crypto_symbol(s)]
+        return sorted(self._tracked())
 
     @staticmethod
     def _wanted(symbol: str) -> bool:
         """
         Whether this symbol's news is worth fetching and scoring. A market or
-        symbol switched off in the UI is skipped, so a paused crypto market costs
-        no Laya time. A held position is always kept: its sentinel still reads
+        symbol switched off in the UI is skipped, so it costs no Laya time. A held position is always kept: its sentinel still reads
         sentiment to manage the exit.
         """
         from core.market_filter import market_filter
@@ -128,9 +103,6 @@ class NewsFeedManager:
         from engine.discovery import discovery
         return {s for s in set(state.watchlist) | set(discovery.sentiment_symbols())
                 if cls._wanted(s)}
-
-    def _crypto_symbols(self) -> List[str]:
-        return [s for s in state.watchlist if is_crypto_symbol(s) and self._wanted(s)]
 
     def _fetch_sync(self, symbols_csv: str, start: datetime, limit: int = 50) -> List:
         """Blocking Alpaca call, run in the executor so the tick loop never waits."""
@@ -163,11 +135,6 @@ class NewsFeedManager:
             equities[i:i + settings.NEWS_BATCH_SYMBOLS]
             for i in range(0, len(equities), settings.NEWS_BATCH_SYMBOLS)
         ]
-        # Crypto: Alpaca indexes these under the concatenated pair.
-        crypto = self._crypto_symbols()
-        crypto_keys = [CRYPTO_NEWS_KEYS[s][0] for s in crypto if s in CRYPTO_NEWS_KEYS]
-        for i in range(0, len(crypto_keys), settings.NEWS_BATCH_SYMBOLS):
-            batches.append(crypto_keys[i:i + settings.NEWS_BATCH_SYMBOLS])
 
         for batch in batches:
             if not batch:
@@ -213,10 +180,6 @@ class NewsFeedManager:
             rs_u = rs.upper()
             if rs_u in tracked:
                 targets.add(rs_u)
-                continue
-            for pair, (key, _name) in CRYPTO_NEWS_KEYS.items():
-                if rs_u == key and pair in state.watchlist and self._wanted(pair):
-                    targets.add(pair)
 
         if not targets:
             return 0

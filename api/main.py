@@ -1,4 +1,5 @@
 import asyncio
+import re
 import time
 import logging
 from contextlib import asynccontextmanager
@@ -316,7 +317,7 @@ class CapitalPlanRequest(BaseModel):
     harvest_pct: float = 0.5
 
 class StrategyClassRequest(BaseModel):
-    asset_class: str      # "crypto" | "equity"
+    asset_class: str = "equity"   # the only asset class
     strategy: str
 
 class SymbolRequest(BaseModel):
@@ -502,19 +503,14 @@ async def list_strategies():
 
 @app.post("/api/strategies/class")
 async def set_class_strategy(req: StrategyClassRequest):
-    """Assigns the default strategy for an entire asset class."""
+    """Assigns the default strategy for US equities (the only asset class)."""
     klass = req.asset_class.lower().strip()
-    if klass not in ("crypto", "equity"):
-        raise HTTPException(status_code=400, detail="asset_class must be 'crypto' or 'equity'")
+    if klass != "equity":
+        raise HTTPException(status_code=400, detail="asset_class must be 'equity' (US stocks only)")
     if strategy_registry.get(req.strategy) is None:
         raise HTTPException(status_code=400,
             detail=f"Unknown strategy '{req.strategy}'. Available: "
                    f"{[s.name for s in strategy_registry.available()]}")
-    if not strategy_registry.is_compatible(req.strategy, klass):
-        # Refused rather than accepted-and-silently-never-trading.
-        raise HTTPException(status_code=400,
-            detail=f"Strategy '{req.strategy}' does not support {klass} assets "
-                   f"(it declares applies_to='{strategy_registry.get(req.strategy).applies_to}')")
 
     old = state.strategy_class_defaults.get(klass)
     state.strategy_class_defaults[klass] = req.strategy
@@ -814,6 +810,11 @@ async def get_watchlist():
 @app.post("/api/watchlist")
 async def add_to_watchlist(req: WatchlistAddRequest):
     sym = req.symbol.upper().strip()
+    # US equity tickers only (letters, optionally one class suffix like BRK.B).
+    # Pairs such as BTC/USD are refused: the platform does not trade crypto.
+    if not re.fullmatch(r"[A-Z]{1,5}(\.[A-Z])?", sym):
+        raise HTTPException(status_code=400,
+                            detail=f"'{sym}' is not a US stock ticker. Only US equities are traded.")
     state.watchlist.add(sym)
     await market_stream.ensure_stock_subscription(sym)
     state.log_event("WATCHLIST", f"Added {sym} to active watchlist")

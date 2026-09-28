@@ -2,8 +2,8 @@
 Which markets and symbols the bots may open NEW positions in.
 
 Turning a market or symbol off only gates entries. Positions already open keep
-their stops, targets and strategy exits, so switching crypto off never strands a
-crypto position the bots can no longer sell.
+their stops, targets and strategy exits, so switching a market off never strands
+a position the bots can no longer sell. US stocks are the only market.
 """
 import json
 import logging
@@ -15,12 +15,11 @@ logger = logging.getLogger("tradeflow.markets")
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 _PATH = os.path.join(_DATA_DIR, "market_filter.json")
 
-MARKETS = ("stocks", "crypto")
+MARKETS = ("stocks",)
 
 
 def market_of(symbol: str) -> str:
-    from core.state import is_crypto_symbol
-    return "crypto" if is_crypto_symbol(symbol) else "stocks"
+    return "stocks"
 
 
 class MarketFilter:

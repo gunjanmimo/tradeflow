@@ -106,8 +106,6 @@ def test_trend_close_waits_out_the_equity_minimum_hold():
     assert pm.decide("AAPL", _pos(99.5, opened_min_ago=5), _read(-0.6))[0] == "HOLD"
 
 
-def test_crypto_has_no_minimum_hold():
-    assert pm.decide("BTC/USD", _pos(99.5, opened_min_ago=1), _read(-0.6))[0] == "CLOSE"
 
 
 def test_trims_a_winner_when_the_trend_reverses():

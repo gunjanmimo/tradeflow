@@ -31,7 +31,6 @@ class RiskProfile:
     max_position_notional_pct: float  # % of budget in any single position
     # Portfolio shape
     max_concurrent_positions: int
-    max_positions_per_asset_class: int
     # Circuit breakers
     max_daily_loss_pct: float
     max_drawdown_pct: float
@@ -46,7 +45,6 @@ class RiskProfile:
     # entry; region targets are not enforceable at entry (we cannot force a buy)
     # and instead steer discovery toward under-filled sleeves.
     max_sector_pct: float = 30.0         # any one GICS sector (and "Unclassified")
-    max_crypto_pct: float = 15.0         # all crypto together: one macro bet
     max_us_pct: float = 60.0
     max_intl_region_pct: float = 20.0    # Europe/UK, and Asia, each
     intl_region_target_pct: float = 10.0
@@ -63,37 +61,37 @@ class RiskProfile:
         return d
 
 
-# factor: (label, risk/trade%, max notional%, max pos, per-class, daily loss%,
+# factor: (label, risk/trade%, max notional%, max pos, daily loss%,
 #          drawdown%, min buy prob, min sentiment, stop ATR x, TP ATR x)
 _TABLE = {
-    1:  ("Capital Preservation", 0.20,  4.0,  2, 1, 1.0,  4.0, 0.80, 0.75, 2.50, 5.00),
-    2:  ("Very Conservative",    0.35,  6.0,  3, 2, 1.5,  5.0, 0.76, 0.72, 2.20, 4.60),
-    3:  ("Conservative",         0.60, 10.0,  4, 2, 2.0,  7.5, 0.70, 0.66, 1.80, 3.80),
-    4:  ("Balanced (default)",   1.00, 15.0,  5, 3, 3.0, 10.0, 0.65, 0.60, 1.50, 3.00),
-    5:  ("Balanced Plus",        1.30, 18.0,  6, 3, 3.5, 12.0, 0.62, 0.58, 1.40, 2.80),
-    6:  ("Growth",               1.60, 21.0,  7, 4, 4.5, 14.0, 0.60, 0.56, 1.35, 2.60),
-    7:  ("Assertive",            1.90, 24.0,  8, 4, 5.5, 16.0, 0.58, 0.54, 1.30, 2.40),
-    8:  ("Aggressive",           2.20, 27.0,  9, 5, 6.5, 18.0, 0.56, 0.52, 1.25, 2.30),
-    9:  ("Very Aggressive",      2.50, 30.0, 10, 6, 7.5, 20.0, 0.54, 0.50, 1.20, 2.20),
-    10: ("Maximum Risk",         3.00, 35.0, 12, 7, 9.0, 25.0, 0.52, 0.48, 1.15, 2.10),
+    1:  ("Capital Preservation", 0.20, 4.0, 2, 1.0, 4.0, 0.80, 0.75, 2.50, 5.00),
+    2:  ("Very Conservative", 0.35, 6.0, 3, 1.5, 5.0, 0.76, 0.72, 2.20, 4.60),
+    3:  ("Conservative", 0.60, 10.0, 4, 2.0, 7.5, 0.70, 0.66, 1.80, 3.80),
+    4:  ("Balanced (default)", 1.00, 15.0, 5, 3.0, 10.0, 0.65, 0.60, 1.50, 3.00),
+    5:  ("Balanced Plus", 1.30, 18.0, 6, 3.5, 12.0, 0.62, 0.58, 1.40, 2.80),
+    6:  ("Growth", 1.60, 21.0, 7, 4.5, 14.0, 0.60, 0.56, 1.35, 2.60),
+    7:  ("Assertive", 1.90, 24.0, 8, 5.5, 16.0, 0.58, 0.54, 1.30, 2.40),
+    8:  ("Aggressive", 2.20, 27.0, 9, 6.5, 18.0, 0.56, 0.52, 1.25, 2.30),
+    9:  ("Very Aggressive", 2.50, 30.0, 10, 7.5, 20.0, 0.54, 0.50, 1.20, 2.20),
+    10: ("Maximum Risk", 3.00, 35.0, 12, 9.0, 25.0, 0.52, 0.48, 1.15, 2.10),
 }
 
 
 # Diversification per level, kept as its own table so the sizing table above stays
 # readable. A cautious dial spreads capital wider and tolerates less overlap.
-# factor: (max sector%, max crypto%, max US%, max Europe/Asia%, Europe/Asia target%,
+# factor: (max sector%, max US%, max Europe/Asia%, Europe/Asia target%,
 #          min defensive%, max pair correlation)
 _DIVERSIFICATION = {
-    1:  (20.0,  5.0, 50.0, 20.0, 15.0, 30.0, 0.60),
-    2:  (22.0,  6.0, 55.0, 20.0, 15.0, 28.0, 0.65),
-    3:  (25.0, 10.0, 55.0, 20.0, 12.0, 25.0, 0.70),
-    4:  (30.0, 15.0, 60.0, 20.0, 10.0, 20.0, 0.75),
-    5:  (32.0, 18.0, 65.0, 22.0, 10.0, 18.0, 0.78),
-    6:  (35.0, 21.0, 70.0, 25.0,  8.0, 15.0, 0.80),
-    7:  (38.0, 24.0, 75.0, 28.0,  8.0, 12.0, 0.82),
-    8:  (40.0, 27.0, 80.0, 30.0,  5.0, 10.0, 0.85),
-    9:  (45.0, 30.0, 85.0, 35.0,  5.0,  5.0, 0.88),
-    10: (50.0, 35.0, 90.0, 40.0,  0.0,  0.0, 0.90),
+    1:  (20.0, 50.0, 20.0, 15.0, 30.0, 0.60),
+    2:  (22.0, 55.0, 20.0, 15.0, 28.0, 0.65),
+    3:  (25.0, 55.0, 20.0, 12.0, 25.0, 0.70),
+    4:  (30.0, 60.0, 20.0, 10.0, 20.0, 0.75),
+    5:  (32.0, 65.0, 22.0, 10.0, 18.0, 0.78),
+    6:  (35.0, 70.0, 25.0, 8.0, 15.0, 0.80),
+    7:  (38.0, 75.0, 28.0, 8.0, 12.0, 0.82),
+    8:  (40.0, 80.0, 30.0, 5.0, 10.0, 0.85),
+    9:  (45.0, 85.0, 35.0, 5.0, 5.0, 0.88),
+    10: (50.0, 90.0, 40.0, 0.0, 0.0, 0.90),
 }
 
 
@@ -108,12 +106,11 @@ def clamp_factor(factor: Any) -> int:
 
 def get_profile(factor: Any = DEFAULT_RISK_FACTOR) -> RiskProfile:
     f = clamp_factor(factor)
-    (label, rpt, notional, maxpos, perclass, daily, dd, minbuy, minsent,
+    (label, rpt, notional, maxpos, daily, dd, minbuy, minsent,
      stop_x, tp_x) = _TABLE[f]
-    sector, crypto, us, intl, intl_target, defensive, corr = _DIVERSIFICATION[f]
+    sector, us, intl, intl_target, defensive, corr = _DIVERSIFICATION[f]
     return RiskProfile(
         max_sector_pct=sector,
-        max_crypto_pct=crypto,
         max_us_pct=us,
         max_intl_region_pct=intl,
         intl_region_target_pct=intl_target,
@@ -124,7 +121,6 @@ def get_profile(factor: Any = DEFAULT_RISK_FACTOR) -> RiskProfile:
         risk_per_trade_pct=rpt,
         max_position_notional_pct=notional,
         max_concurrent_positions=maxpos,
-        max_positions_per_asset_class=perclass,
         max_daily_loss_pct=daily,
         max_drawdown_pct=dd,
         min_buy_prob=minbuy,
@@ -147,7 +143,6 @@ def describe_change(old_factor: int, new_factor: int) -> str:
         f"entry bar {a.min_buy_prob} -> {b.min_buy_prob}, "
         f"R:R {a.reward_risk_ratio} -> {b.reward_risk_ratio}, "
         f"sector cap {a.max_sector_pct}% -> {b.max_sector_pct}%, "
-        f"crypto cap {a.max_crypto_pct}% -> {b.max_crypto_pct}%, "
         f"min defensive {a.min_defensive_pct}% -> {b.min_defensive_pct}%."
     )
 

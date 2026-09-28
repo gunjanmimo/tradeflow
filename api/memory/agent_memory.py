@@ -39,7 +39,7 @@ from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional
 
 from core.config import settings
-from core.state import state, is_crypto_symbol
+from core.state import state
 from memory.hydra_client import hydra, stable_id
 
 logger = logging.getLogger("tradeflow.memory")
@@ -103,7 +103,7 @@ def _vol_bucket(atr_pct: Optional[float]) -> str:
 
 
 def _session_bucket(ts: Optional[float] = None) -> str:
-    """UTC hour band. Crypto behaves differently by session even though it never closes."""
+    """UTC hour band."""
     t = time.gmtime(ts or time.time())
     h = t.tm_hour
     if 13 <= h < 21:
@@ -126,7 +126,7 @@ def setup_key(strategy: str, symbol: str, rsi: Optional[float],
     and a finer grid would spread a handful of trades across hundreds of cells
     where every one looks like a 100% or 0% win rate on n=1.
     """
-    klass = "crypto" if is_crypto_symbol(symbol) else "equity"
+    klass = "equity"
     parts = {
         "strategy": strategy,
         "asset_class": klass,
@@ -265,7 +265,7 @@ class AgentMemory:
             ok &= await hydra.link(
                 "Trade", f"trade:{trade_id}", "ON", "Symbol", f"symbol:{symbol}",
                 to_props={"ticker": symbol,
-                          "asset_class": "crypto" if is_crypto_symbol(symbol) else "equity"},
+                          "asset_class": "equity"},
             )
             # Trade -> Setup  (the join point that makes condition-based recall work)
             ok &= await hydra.link(

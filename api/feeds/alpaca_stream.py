@@ -49,8 +49,7 @@ class MarketStreamRunner:
         without this a promoted symbol would never receive a price until restart.
         The simulated stream reads the watchlist every loop and needs nothing.
         """
-        from core.state import is_crypto_symbol
-        if not (self._running and self._live) or is_crypto_symbol(symbol):
+        if not (self._running and self._live):
             return
         stream = self._stock_stream
         if stream is None:
@@ -65,8 +64,7 @@ class MarketStreamRunner:
         position's stop and target checked at most once a minute, after the bar
         closed; each print now reaches its sentinel within milliseconds.
         """
-        from core.state import is_crypto_symbol
-        if not (self._running and self._live) or is_crypto_symbol(symbol):
+        if not (self._running and self._live):
             return
         stream = self._stock_stream
         if stream is None or self._stock_trade_handler is None:
@@ -159,8 +157,7 @@ class MarketStreamRunner:
 
     async def _run_simulated_stream(self):
         """
-        Generates realistic high-frequency ticks for the active watchlist.
-        Ensures continuous trading testing works anywhere anytime.
+        Generates simulated ticks for the watchlist when no Alpaca keys are set.
         """
         base_prices = {
             "NVDA": 128.50,
@@ -168,9 +165,6 @@ class MarketStreamRunner:
             "TSLA": 252.10,
             "MSFT": 428.80,
             "PLTR": 42.10,
-            "BTC/USD": 84950.00,
-            "ETH/USD": 2715.00,
-            "SOL/USD": 124.10,
         }
 
         # Initialize base price history so indicators have starting candles
@@ -206,75 +200,12 @@ class MarketStreamRunner:
                 logger.error(f"Error in simulated market stream: {e}")
                 await asyncio.sleep(1.0)
 
-    async def _run_crypto_live_feed(self):
-        """24/7 Real-Time Crypto Data Feed from Alpaca + Binance Public Tickers"""
-        import urllib.request
-        import json
-        from core.state import is_crypto_symbol
-        from alpaca.data.historical.crypto import CryptoHistoricalDataClient
-        from alpaca.data.requests import CryptoLatestQuoteRequest
-
-        client = None
-        try:
-            client = CryptoHistoricalDataClient(settings.ALPACA_API_KEY, settings.ALPACA_SECRET_KEY)
-            logger.info("24/7 Alpaca Crypto Live Feed initialized.")
-        except Exception as e:
-            logger.warning(f"Alpaca crypto client setup warning: {e}")
-
-        def fetch_binance_prices_sync(symbols_list):
-            try:
-                # Fast targeted query for active watchlist
-                binance_symbols = [s.replace("/", "").replace("USD", "USDT") for s in symbols_list]
-                query = json.dumps(binance_symbols).replace(" ", "")
-                url = f"https://api.binance.com/api/v3/ticker/price?symbols={urllib.parse.quote(query)}"
-                req = urllib.request.Request(url, headers={"User-Agent": "TradeFlow/1.0"})
-                with urllib.request.urlopen(req, timeout=2) as resp:
-                    data = json.loads(resp.read().decode())
-                    return {item["symbol"]: float(item["price"]) for item in data}
-            except Exception:
-                try:
-                    # Fallback to full endpoint
-                    url = "https://api.binance.com/api/v3/ticker/price"
-                    req = urllib.request.Request(url, headers={"User-Agent": "TradeFlow/1.0"})
-                    with urllib.request.urlopen(req, timeout=3) as resp:
-                        data = json.loads(resp.read().decode())
-                        return {item["symbol"]: float(item["price"]) for item in data}
-                except Exception as e:
-                    logger.debug(f"Binance price poll note: {e}")
-                    return {}
-
-        while self._running:
-            cryptos = [s for s in state.watchlist if is_crypto_symbol(s)]
-            if cryptos:
-                loop = asyncio.get_running_loop()
-                t_poll = time.perf_counter_ns()
-                binance_map = await loop.run_in_executor(None, fetch_binance_prices_sync, cryptos)
-                # A polled price is at least one round-trip old when it lands.
-                latency.record_ns("feed_crypto_poll", t_poll)
-                
-                for sym in cryptos:
-                    binance_pair = sym.replace("/", "").replace("USD", "USDT")
-                    price = binance_map.get(binance_pair)
-                    if price and price > 0:
-                        precision = 8 if price < 0.0001 else (4 if price < 1.0 else 2)
-                        spread = price * 0.0004
-                        await self.on_tick_received(
-                            symbol=sym,
-                            price=round(price, precision),
-                            bid=round(price - (spread / 2), precision),
-                            ask=round(price + (spread / 2), precision),
-                            volume=1000.0
-                        )
-
-            await asyncio.sleep(0.5)
-
     async def _run_stock_live_feed(self):
         """Stock WebSocket Data Stream (runs during market hours, maintains baseline off-hours)"""
-        from core.state import is_crypto_symbol
         from alpaca.data.live import StockDataStream
 
-        stocks = [s for s in state.watchlist if not is_crypto_symbol(s)]
-        if not stocks and not any(not is_crypto_symbol(s) for s in state.active_positions):
+        stocks = list(state.watchlist)
+        if not stocks and not state.active_positions:
             return
 
         try:
@@ -304,7 +235,7 @@ class MarketStreamRunner:
                     pass
                 await self.on_position_trade(trade.symbol, float(trade.price))
 
-            held = [s for s in state.active_positions if not is_crypto_symbol(s)]
+            held = list(state.active_positions)
             for s in sorted(set(stocks) | set(held)):
                 stock_stream.subscribe_bars(handle_stock_bar, s)
             for s in held:
@@ -324,7 +255,6 @@ class MarketStreamRunner:
         would sit without a price (and without a spread) all pre-market. Polls the
         latest real bid/ask instead; the quote spread feeds the spread gate.
         """
-        from core.state import is_crypto_symbol
         from core.market_hours import us_session, PRE
         from alpaca.data.historical import StockHistoricalDataClient
         from alpaca.data.requests import StockLatestQuoteRequest
@@ -333,7 +263,7 @@ class MarketStreamRunner:
         loop = asyncio.get_running_loop()
         while self._running:
             try:
-                stocks = sorted(s for s in state.watchlist if not is_crypto_symbol(s))
+                stocks = sorted(state.watchlist)
                 if settings.PREMARKET_TRADING_ENABLED and stocks and us_session() == PRE:
                     quotes = await loop.run_in_executor(
                         None, client.get_stock_latest_quote,
@@ -353,9 +283,8 @@ class MarketStreamRunner:
             await asyncio.sleep(settings.PREMARKET_QUOTE_POLL_SECONDS)
 
     async def _run_alpaca_websocket(self):
-        """Runs 24/7 crypto and stock market streams concurrently without blocking"""
+        """Runs the stock bar stream and the pre-market quote poller concurrently."""
         await asyncio.gather(
-            self._run_crypto_live_feed(),
             self._run_stock_live_feed(),
             self._run_premarket_quote_poller(),
         )

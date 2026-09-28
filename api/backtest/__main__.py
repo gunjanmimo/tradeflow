@@ -80,8 +80,6 @@ def main(argv=None):
     ap.add_argument("--variants", default=",".join(["no_harvest", "before", "harvest_any", "recovery", "current"]))
     ap.add_argument("--notional", type=float, default=1000.0, help="dollars per entry")
     ap.add_argument("--stock-half-spread-bps", type=float, default=2.0)
-    ap.add_argument("--crypto-half-spread-bps", type=float, default=5.0)
-    ap.add_argument("--crypto-fee-bps", type=float, default=25.0)
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1))
     a = ap.parse_args(argv)
 
@@ -96,7 +94,7 @@ def main(argv=None):
     bad = [v for v in variants if v not in sim.VARIANTS]
     if bad:
         sys.exit(f"unknown variant(s) {bad}; choose from {list(sim.VARIANTS)}")
-    costs = sim.Costs(a.stock_half_spread_bps, a.crypto_half_spread_bps, a.crypto_fee_bps)
+    costs = sim.Costs(a.stock_half_spread_bps)
 
     print(f"Loading {a.days} days of 1-minute bars for {len(symbols)} symbols...")
     bars = data.load_many(symbols, a.days)
@@ -124,28 +122,22 @@ def main(argv=None):
                 w.writerow(row)
 
     lines = [f"# Backtest: {a.days} days, {len(bars)} symbols, ${a.notional:,.0f} per entry", "",
-             f"Costs: stock half-spread {a.stock_half_spread_bps} bps; crypto half-spread "
-             f"{a.crypto_half_spread_bps} bps + fee {a.crypto_fee_bps} bps per side. "
+             f"Costs: half-spread {a.stock_half_spread_bps} bps per fill. "
              "No news history: sentiment is neutral.", "",
              "## Exit rules compared (all strategies pooled)", "", HEAD]
     for v in variants:
         lines.append(_row(v, stats(results[v])))
-    for klass in ("equity", "crypto"):
-        lines += ["", f"## {klass}: by exit rules", "", HEAD]
-        for v in variants:
-            lines.append(_row(v, stats([t for t in results[v] if registry.asset_class(t.symbol) == klass])))
     for v in variants:
         lines += ["", f"## Strategies under `{v}`, best first", "", HEAD]
         by = defaultdict(list)
         for t in results[v]:
-            by[(t.strategy, registry.asset_class(t.symbol))].append(t)
-        for (name, klass), ts in sorted(by.items(), key=lambda kv: -sum(t.pnl for t in kv[1])):
-            lines.append(_row(f"{name} ({klass})", stats(ts)))
-    live = {"crypto": state.strategy_class_defaults["crypto"], "equity": state.strategy_class_defaults["equity"]}
-    lines += ["", f"## Live defaults only ({live['equity']} for stocks, {live['crypto']} for crypto)", "", HEAD]
+            by[t.strategy].append(t)
+        for name, ts in sorted(by.items(), key=lambda kv: -sum(t.pnl for t in kv[1])):
+            lines.append(_row(name, stats(ts)))
+    live = state.strategy_class_defaults["equity"]
+    lines += ["", f"## Live default only ({live})", "", HEAD]
     for v in variants:
-        lines.append(_row(v, stats([t for t in results[v]
-                                    if t.strategy == live[registry.asset_class(t.symbol)]])))
+        lines.append(_row(v, stats([t for t in results[v] if t.strategy == live])))
     report = "\n".join(lines) + "\n"
     with open(os.path.join(OUT_DIR, "report.md"), "w") as f:
         f.write(report)

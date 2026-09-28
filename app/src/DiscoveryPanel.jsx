@@ -355,7 +355,7 @@ function DiversificationView({ div }) {
         <div className="rounded-lg ring-1 ring-white/10 p-3 bg-white/[0.02]">
           <h3 className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">Limits at risk dial {div.risk_factor} ({div.risk_label})</h3>
           <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-slate-300">
-            <span>Any sector ≤ {L.max_sector_pct}%</span><span>Crypto ≤ {L.max_crypto_pct}%</span>
+            <span>Any sector ≤ {L.max_sector_pct}%</span>
             <span>US ≤ {L.max_us_pct}%</span><span>Europe / Asia ≤ {L.max_intl_region_pct}% each</span>
             <span>Defensive ≥ {L.min_defensive_pct}%</span><span>Single position ≤ {L.max_position_pct}%</span>
             <span className="col-span-2">Correlation ≥ {L.max_pair_correlation} with a holding halves size</span>

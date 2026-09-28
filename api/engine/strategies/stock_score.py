@@ -23,8 +23,7 @@ news, intraday downtrend, overbought RSI, wide spread.
 Exits are deliberately slow. Stop and target always apply, but a discretionary
 exit needs the score to fall below STOCK_SCORE_EXIT_BELOW -- which takes the
 daily picture weakening, not one bad minute -- or the news turning, and never
-inside the minimum hold. Flipping in and out on intraday noise is what burned
-the crypto momentum bots.
+inside the minimum hold. Flipping in and out on intraday noise only pays costs.
 """
 import time
 from typing import Any, Dict, Optional
@@ -83,7 +82,6 @@ class StockScoreStrategy(Strategy):
         "they have real data. Vetoes on bearish insiders, negative news, downtrends "
         "and overbought RSI. Exits slowly to avoid churn."
     )
-    applies_to = "equity"
     requires_sentiment = False
     source = "TradeFlow"
 

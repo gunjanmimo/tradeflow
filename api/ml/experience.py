@@ -5,7 +5,7 @@ trade finally made. This is what the trade scorer learns from.
   on_entry   the portfolio manager's entry: the bar window it scored, the
              strategy that fired, and the model's score (if one is loaded)
   on_close   the position's whole result -- final sale, profit harvests and
-             trims -- minus crypto taker fees, appended as one line to
+             trims -- appended as one line to
              data/ml/experience.jsonl
 
 Nothing here is on the tick path: an entry is recorded once per trade, a close
@@ -31,17 +31,13 @@ PENDING_PATH = os.path.join(DATA_DIR, "pending.json")
 
 
 def net_result(pos: Dict[str, Any], final_pnl: float, crypto: bool) -> Dict[str, float]:
-    """The position's whole result, net of crypto fees, in dollars and % of what was invested."""
+    """The position's whole result in dollars and % of what was invested."""
     invested = float(pos.get("invested_dollars") or 0.0)
     if invested <= 0:
         invested = float(pos.get("qty") or 0.0) * float(pos.get("avg_entry_price") or 0.0)
     gross = (float(final_pnl) + float(pos.get("harvested_income") or 0.0)
              + float(pos.get("trimmed_pnl") or 0.0))
     fees = 0.0
-    if crypto:
-        # Harvest income is already net of its own fee; this charges the buy and
-        # the remaining sales, which the broker P&L leaves out.
-        fees = settings.CRYPTO_TAKER_FEE_BPS / 1e4 * (2 * invested + gross)
     net = gross - fees
     return {"net_pnl": round(net, 4), "ret_pct": round(net / invested * 100, 4) if invested > 0 else 0.0,
             "invested": round(invested, 2)}

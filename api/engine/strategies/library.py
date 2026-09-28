@@ -56,7 +56,6 @@ class QuantStrategy(Strategy):
     every strategy must get identically right: the history requirement, the
     consensus tilt, the spread gate, the bearish-news veto and the risk dial.
     """
-    applies_to = "any"
     requires_sentiment = False
     council_member = True
     min_history: int = 40

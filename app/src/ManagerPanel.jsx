@@ -239,7 +239,7 @@ export function ManagerPanel({ manager, positions, fleet }) {
                     </span>
                   </span>
                   <span title="Minutes until the market this stock trades on closes">
-                    closes in <span className="text-slate-200">{p.minutes_to_close === null || p.minutes_to_close === undefined ? '24/7' : fmtMin(p.minutes_to_close)}</span>
+                    closes in <span className="text-slate-200">{p.minutes_to_close === null || p.minutes_to_close === undefined ? '—' : fmtMin(p.minutes_to_close)}</span>
                   </span>
                   <span title="Minutes until it is force-closed for the day">
                     flatten in <span className={p.flatten_in_min !== null && p.flatten_in_min !== undefined && p.flatten_in_min <= 5 ? 'text-rose-300' : 'text-slate-200'}>

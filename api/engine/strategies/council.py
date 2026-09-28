@@ -73,11 +73,9 @@ class CouncilReport:
         return self.consensus
 
 
-def _members(is_crypto: bool):
+def _members():
     from engine.strategies import registry
-    klass = "crypto" if is_crypto else "equity"
-    return [s for s in registry.available()
-            if s.council_member and s.applies_to in ("any", klass)]
+    return [s for s in registry.available() if s.council_member]
 
 
 def convene(ctx: StrategyContext) -> CouncilReport:
@@ -85,7 +83,7 @@ def convene(ctx: StrategyContext) -> CouncilReport:
     votes: List[Vote] = []
     abstained: List[str] = []
 
-    for strat in _members(ctx.is_crypto):
+    for strat in _members():
         entry = strat.evaluate_entry(ctx)
         if entry.blocked_by in ("no_data", "no_volume"):
             abstained.append(strat.name)

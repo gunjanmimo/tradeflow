@@ -112,51 +112,16 @@ def round_price(value: float, ref_price: float) -> float:
     return round(float(value), price_decimals(ref_price))
 
 
-def qty_decimals(price: float) -> int:
-    """
-    Quantity precision for a fractional (crypto) order, chosen so that one
-    quantity step is a negligible fraction of the order's notional value.
-
-    Cheap assets are bought in large whole units; expensive ones in small
-    fractions. A flat precision breaks one end or the other.
-    """
-    p = abs(float(price))
-    if p >= 10000:
-        return 6
-    if p >= 100:
-        return 4
-    if p >= 1:
-        return 3
-    if p >= 0.01:
-        return 1
-    return 0
-
-
-def is_crypto_symbol(symbol: str) -> bool:
-    """Helper to detect if a ticker is a cryptocurrency pair"""
-    sym = symbol.upper()
-    return "/USD" in sym or sym in ("BTC", "ETH", "SOL", "AVAX", "DOGE", "LINK")
-
 class InMemoryState:
     """
-    Sub-microsecond In-Memory State store for continuous execution loop.
-    Supports both US Equities (NYSE/NASDAQ) and 24/7 Cryptocurrencies.
+    In-memory state store for the trading engine. US equities only.
     """
     def __init__(self):
         # Global Kill Switch (Deactivated by default on boot for safety)
         self.is_trading_active: bool = False
         
-        # Dual Watchlist: High-liquidity Equities + 24/7 Top Crypto
-        self.watchlist: set[str] = {
-            # US Equities
-            "NVDA", "AAPL", "MSFT", "PLTR",
-            # 24/7 High-Volume Cryptocurrencies
-            "BTC/USD", "ETH/USD", "SOL/USD", "BNB/USD", "XRP/USD",
-            "DOGE/USD", "ADA/USD", "AVAX/USD", "LINK/USD", "SUI/USD",
-            "NEAR/USD", "TAO/USD", "LTC/USD", "BCH/USD", "UNI/USD",
-            "TRX/USD", "ZEC/USD", "XLM/USD", "HBAR/USD", "WLD/USD",
-            "SHIB/USD", "HYPE/USD"
-        }
+        # Default watchlist: liquid US large caps (discovery adds more at runtime).
+        self.watchlist: set[str] = {"NVDA", "AAPL", "MSFT", "PLTR"}
         
         # Real-time price ticks: symbol -> PriceTick
         self.latest_prices: Dict[str, PriceTick] = {}
@@ -223,10 +188,9 @@ class InMemoryState:
         self.allocated_capital: float = 10000.0
 
         # --- Strategy selection ---
-        # Which strategy runs per asset class, and per-symbol overrides that win
-        # over the class default. Changed live from the API; read on every tick.
+        # The default strategy, and per-symbol overrides that win over it.
+        # Changed live from the API; read on every tick.
         self.strategy_class_defaults: Dict[str, str] = {
-            "crypto": "momentum_breakout",
             "equity": "stock_score",
         }
         self.strategy_overrides: Dict[str, str] = {}

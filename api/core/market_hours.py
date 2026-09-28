@@ -48,17 +48,14 @@ def _broker_close() -> datetime | None:
 
 def minutes_to_close(symbol: str, now: datetime | None = None) -> float | None:
     """
-    Minutes until the market this symbol trades on closes, or None when it has no
-    close to race (crypto trades 24/7) or its regular session is not open.
+    Minutes until the market this symbol trades on closes, or None when its
+    regular session is not open.
 
     Every equity the bots can buy is listed on a US exchange -- ADRs and ETFs
     included, whatever their home market -- so they all close with the US market.
     The broker clock gives the actual close (an early-close day ends at 13:00);
     without it the normal 16:00 NY close is assumed.
     """
-    from core.state import is_crypto_symbol
-    if is_crypto_symbol(symbol):
-        return None
     now_ny = (now or datetime.now(_NY)).astimezone(_NY)
     if us_session(now_ny) != REGULAR:
         return None

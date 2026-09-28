@@ -148,23 +148,6 @@ def test_non_fractionable_stock_holds_one_share_whole(sim, monkeypatch):
     assert pos["harvest_unsplittable"]
 
 
-def test_crypto_harvest_must_clear_the_fees(sim):
-    sym = "HRV/USD"
-    state.active_positions[sym] = {"symbol": sym, "qty": 10.0, "avg_entry_price": 100.0,
-                                   "current_price": 100.2, "mode": "SIMULATED"}
-    try:
-        # +0.2%: under the 0.25% + 0.25% taker fees, so no "income" that is really a loss.
-        state.update_price(sym, 100.2)
-        assert profit_harvest.check(sym, state.active_positions[sym], 100.2, 10.0, 100.0, now=1e9) is None
-        state.update_price(sym, 101.0)
-        d = profit_harvest.check(sym, state.active_positions[sym], 101.0, 10.0, 100.0, now=1e9)
-        assert d is not None
-        asyncio.run(sim._execute_trim(d))
-        # 5 sold: (101 * 0.9975 - 100 * 1.0025) * 5 = $2.49, net of both fees.
-        assert state.harvested_today == pytest.approx(2.49, abs=0.01)
-    finally:
-        state.active_positions.pop(sym, None)
-        state.latest_prices.pop(sym, None)
 
 
 def test_harvest_repeats_only_on_new_profit_and_is_throttled(sim):
