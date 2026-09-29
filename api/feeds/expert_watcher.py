@@ -8,30 +8,11 @@ from sentiment.laya_service import laya_service
 
 logger = logging.getLogger("tradeflow.experts")
 
-# Sample expert profiles representing top algorithmic/copy traders and smart-money funds
-BENCHMARK_EXPERTS = [
-    {
-        "trader_id": "quant_fund_alpha",
-        "name": "Alpha Systematic (eToro Popular Investor)",
-        "win_rate": 0.76,
-        "portfolio": ["NVDA", "AAPL", "MSFT", "PLTR"],
-        "recent_action": "Increased position in NVDA due to data center demand acceleration."
-    },
-    {
-        "trader_id": "macro_whale_hedge",
-        "name": "Smart Money Whale (13F Tracker)",
-        "win_rate": 0.71,
-        "portfolio": ["AMZN", "GOOGL", "META", "TSLA"],
-        "recent_action": "Aggressive accumulation in AMZN cloud infrastructure."
-    },
-    {
-        "trader_id": "momentum_breakout",
-        "name": "Breakout Pro (Top Momentum)",
-        "win_rate": 0.68,
-        "portfolio": ["AMD", "AVGO", "ARM", "NVDA"],
-        "recent_action": "Bullish breakout setup above 20 EMA in semiconductor sector."
-    }
-]
+# There is no expert/copy-trader data source wired in: the illustrative list of
+# made-up portfolios that used to sit here is gone. Real copy-trading conviction
+# comes from the eToro pillar in multi_source_aggregator.py (needs ETORO_API_KEY).
+BENCHMARK_EXPERTS: List[Dict[str, Any]] = []
+
 
 class ExpertTraderWatcher:
     """
@@ -55,8 +36,8 @@ class ExpertTraderWatcher:
         """
         Expert-portfolio sync.
 
-        DISABLED as a trading input. BENCHMARK_EXPERTS below is a hardcoded
-        illustrative list, not live data. It previously did two harmful things:
+        DISABLED as a trading input. BENCHMARK_EXPERTS used to be a hardcoded
+        illustrative list, not live data (now empty). It previously did two harmful things:
         it expanded the tradeable watchlist with unvetted symbols, and it fed
         invented thesis strings ("Aggressive accumulation in AMZN...") into Laya,
         which then reported bullish sentiment on fiction.

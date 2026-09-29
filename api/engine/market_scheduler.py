@@ -103,7 +103,31 @@ class MarketSessionScheduler:
             if (now_ny.hour == 9 and now_ny.minute >= 30) or (10 <= now_ny.hour < 16):
                 is_us_open = True
 
+        # The operator's clock (settings.DISPLAY_TIMEZONE): what the dashboard shows.
+        from core.config import settings
+        from core.market_hours import us_session
+        try:
+            local_tz = zoneinfo.ZoneInfo(settings.DISPLAY_TIMEZONE)
+        except Exception:
+            local_tz = self.tz_cet
+        now_local = datetime.now(local_tz)
+
+        def local(iso: Optional[str]) -> Optional[str]:
+            if not iso:
+                return None
+            try:
+                t = datetime.fromisoformat(iso).astimezone(local_tz)
+            except ValueError:
+                return None
+            day = "today" if t.date() == now_local.date() else t.strftime("%a %d %b")
+            return f"{day} {t.strftime('%H:%M %Z')}"
+
         return {
+            "display_tz": str(local_tz),
+            "current_time_local": now_local.strftime("%H:%M:%S %Z"),
+            "us_session": us_session(),
+            "next_us_open_local": local(next_us_open),
+            "next_us_close_local": local(getattr(self, "_next_close_iso", None)) if is_us_open else None,
             "current_time_utc": now_utc.strftime("%Y-%m-%d %H:%M:%S UTC"),
             "current_time_ny": now_ny.strftime("%Y-%m-%d %I:%M:%S %p %Z"),
             "current_time_cet": now_cet.strftime("%Y-%m-%d %H:%M:%S %Z"),

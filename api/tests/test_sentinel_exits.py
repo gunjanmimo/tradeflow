@@ -3,8 +3,10 @@ The sentinel's whole exit policy: stop, target, forced exit, strategy exit.
 
   * the stop closes on the first print at or through it (no confirmation delay)
   * the target closes at or above it
-  * a strategy exit closes; nothing else does (no harvest, trims, adds or
-    "soft" reversal/news exits)
+  * a strategy exit closes; nothing else does (no trims, adds or "soft"
+    reversal/news exits)
+  * profit-taking: nothing below +1R; at +1R the sentinel asks the executor to
+    scale out (engine/profit_manager.py) instead of closing
 """
 import asyncio
 import time
@@ -23,11 +25,14 @@ ENTRY = 100.0
 @pytest.fixture
 def world(monkeypatch):
     sent = []
-    strat = {"close": False}
+    strat = {"close": False, "profit": []}
 
     class _Exec:
         async def execute_decision(self, decision):
             sent.append(decision)
+
+        async def manage_profit(self, symbol, act):
+            strat["profit"].append(act)
 
     class _Strat:
         name = "stub"
@@ -91,12 +96,16 @@ def test_strategy_exit_closes(world):
     assert len(sent) == 1 and "policy says flat" in sent[0].reason
 
 
-def test_no_partial_sells_or_adds_on_a_winner(world):
-    """The old harvest sold half on any uptick; now a winner just runs to its exit."""
-    bot, sent, _ = world
-    _run(bot, 100.2, 100.8, 101.5)
-    assert sent == []
-    assert state.active_positions[SYM]["qty"] == 10.0
+def test_a_winner_scales_out_at_one_r_not_before(world):
+    """The old harvest sold half on any uptick; now nothing happens until +1R, then half is sold."""
+    bot, sent, strat = world
+    _run(bot, 100.2, 100.8)
+    assert sent == [] and strat["profit"] == []                # under +1R (R = $1): nothing
+    _run(bot, 101.5)
+    assert sent == [] and len(strat["profit"]) == 1            # a scale-out, not a close
+    act = strat["profit"][0]
+    assert act["type"] == "scale_out" and act["new_stop"] > ENTRY
+    assert state.active_positions[SYM]["initial_stop"] == 99.0
 
 
 def test_dust_is_closed_at_once(world):

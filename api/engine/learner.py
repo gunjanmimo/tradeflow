@@ -29,7 +29,7 @@ from zoneinfo import ZoneInfo
 
 from core.config import settings
 from core.state import state
-from engine.fleet import Agent
+from engine.agent import Agent
 
 logger = logging.getLogger("tradeflow.learner")
 

@@ -1,3 +1,5 @@
+import json
+import os
 import time
 from collections import deque
 from typing import Dict, Any, List, Optional
@@ -6,6 +8,30 @@ import asyncio
 from core.risk_profile import (
     RiskProfile, get_profile, clamp_factor, DEFAULT_RISK_FACTOR,
 )
+
+_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+_RISK_PATH = os.path.join(_DATA_DIR, "risk_dial.json")
+
+
+def _load_risk_factor() -> int:
+    """The dial the user last set on the dashboard; DEFAULT_RISK_FACTOR if never set."""
+    try:
+        with open(_RISK_PATH) as f:
+            return clamp_factor(json.load(f).get("risk_factor", DEFAULT_RISK_FACTOR))
+    except (OSError, ValueError, AttributeError):
+        return DEFAULT_RISK_FACTOR
+
+
+def _save_risk_factor(factor: int):
+    try:
+        os.makedirs(_DATA_DIR, exist_ok=True)
+        tmp = _RISK_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"risk_factor": int(factor), "saved_at": time.time()}, f)
+        os.replace(tmp, _RISK_PATH)
+    except OSError:
+        pass
+
 
 @dataclass
 class ScoredHeadline:
@@ -120,8 +146,9 @@ class InMemoryState:
         # Global Kill Switch (Deactivated by default on boot for safety)
         self.is_trading_active: bool = False
         
-        # Default watchlist: liquid US large caps (discovery adds more at runtime).
-        self.watchlist: set[str] = {"NVDA", "AAPL", "MSFT", "PLTR"}
+        # Starts empty: every watched stock is discovered at runtime -- the scout's
+        # hourly picks (scout/), smart-money buys, or what the user adds by hand.
+        self.watchlist: set[str] = set()
         
         # Real-time price ticks: symbol -> PriceTick
         self.latest_prices: Dict[str, PriceTick] = {}
@@ -204,8 +231,10 @@ class InMemoryState:
 
         # Portfolio-wide risk dial (1-10, default 4). Every risk limit is derived
         # from this, so changing it takes effect on the very next evaluation --
-        # no restart, no recomputation step.
-        self._risk_factor: int = DEFAULT_RISK_FACTOR
+        # no restart, no recomputation step. The value the user sets on the
+        # dashboard is saved (data/risk_dial.json) and restored on start-up, so a
+        # restart never silently puts the dial back to the default.
+        self._risk_factor: int = _load_risk_factor()
 
         # --- Portfolio-level risk tracking (drives the circuit breakers) ---
         # Realised PnL booked today, reset at the start of each trading day.
@@ -236,6 +265,7 @@ class InMemoryState:
     @risk_factor.setter
     def risk_factor(self, value):
         self._risk_factor = clamp_factor(value)
+        _save_risk_factor(self._risk_factor)
 
     @property
     def risk_profile(self) -> RiskProfile:
@@ -406,6 +436,9 @@ class InMemoryState:
         prev = self.spread_estimate.get(symbol)
         # Slow EWMA: one wide quote in a burst should not swing the estimate.
         self.spread_estimate[symbol] = rel if prev is None else 0.98 * prev + 0.02 * rel
+        # The spread monitor's short-window median (IEX fallback; see feeds/spreads.py).
+        from feeds.spreads import spreads
+        spreads.on_quote(symbol, bid, ask, now)
         tick = self.latest_prices.get(symbol)
         if tick is not None:
             tick.bid, tick.ask = float(bid), float(ask)

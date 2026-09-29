@@ -185,6 +185,8 @@ class NewsFeedManager:
             return 0
 
         state.mark_news_seen(news_id)
+        from feeds.news_log import news_log
+        news_log.ingest(news_id, headline, summary, source, raw_syms, published_at, "feed", targets)
 
         # Laya reads the headline plus summary: more context inside its 512-token
         # budget yields a better-grounded reading than a headline alone.
@@ -193,11 +195,15 @@ class NewsFeedManager:
 
         scored = 0
         for sym in targets:
+            t0 = time.perf_counter()
             try:
                 rec = await sentiment_service.score_headline(sym, text, persist=False)
             except Exception as e:
                 logger.error(f"Sentiment scoring failed for {sym}: {e}")
+                news_log.failed(news_id, "feed", sym, str(e))
                 continue
+            news_log.scored(news_id, "feed", sym, rec.pos_prob, rec.neg_prob, sentiment_service.active,
+                            (time.perf_counter() - t0) * 1000)
             state.record_headline(ScoredHeadline(
                 news_id=f"{news_id}:{sym}",
                 symbol=sym,

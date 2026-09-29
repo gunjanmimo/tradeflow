@@ -39,23 +39,28 @@ services:
     container_name: tradeflow-backend
     env_file:
       - ./api/.env
+    # Host networking: the trade desk's LLM (Ollama) runs on the host and listens
+    # on 127.0.0.1:11434 only, which a bridged container cannot reach. On the
+    # host network the container's localhost is the host's, and the API is on
+    # port 8000 of the host directly (no port mapping needed).
+    network_mode: host
     environment:
       MEMORY_ENABLED: "${MEMORY_ENABLED:-false}"
-      HYDRA_HTTP_URL: http://hydradb:8443
+      # Log timestamps and labels in the operator's time; trading logic uses New York time.
+      TZ: "${DISPLAY_TIMEZONE:-Europe/Paris}"
+      DISPLAY_TIMEZONE: "${DISPLAY_TIMEZONE:-Europe/Paris}"
+      OLLAMA_URL: http://localhost:11434
+      HYDRA_HTTP_URL: http://localhost:8443
       HYDRA_GRAPH_ID: default
       HYDRA_NAMESPACE: default
       HYDRA_CELL_ID: cell-0
       HYDRA_AUTH_TOKEN_FILE: /hydra/auth-token
-    ports:
-      - "8000:8000"
     volumes:
       - ./api:/app
       - hf-cache:/root/.cache/huggingface
       # read-only: the backend needs the token, not write access to the graph store
       - ./hydradb-data/auth-token:/hydra/auth-token:ro
     restart: unless-stopped
-    networks:
-      - tradeflow-net
 
   frontend:
     build:
@@ -64,6 +69,10 @@ services:
     container_name: tradeflow-frontend
     ports:
       - "5173:5173"
+    # The backend runs on the host network (see backend); nginx reaches it
+    # through the host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - backend
     restart: unless-stopped

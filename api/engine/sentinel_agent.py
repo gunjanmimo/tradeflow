@@ -29,7 +29,8 @@ import time
 from typing import Any, Dict, Optional
 
 from core.state import state, TradeDecision
-from engine import brackets, action_policy, forced_exits
+from core.config import settings
+from engine import brackets, action_policy, forced_exits, profit_manager
 from core.latency import latency
 
 logger = logging.getLogger("tradeflow.sentinel")
@@ -157,6 +158,11 @@ class PositionSentinelBot:
         self._sync_from_position(pos)
         self.highest_price = max(self.highest_price, price)
         pnl_pct = (price - self.entry_price) / self.entry_price if self.entry_price > 0 else 0.0
+        if not pos.get("initial_stop") and 0 < self.stop_loss < self.entry_price:
+            # The risk the trade was opened with: R for the profit-taking rules.
+            pos["initial_stop"] = self.stop_loss
+            profit_manager.meta.put(self.symbol, initial_stop=self.stop_loss, scaled_out=bool(pos.get("scaled_out")),
+                                    stop_loss=self.stop_loss, take_profit=self.take_profit)
 
         reason = self._exit_reason(pos, price, pnl_pct)
         closing = reason is not None
@@ -168,7 +174,10 @@ class PositionSentinelBot:
         elif price > self.entry_price and self.take_profit > self.entry_price:
             close_p = (price - self.entry_price) / (self.take_profit - self.entry_price)
         close_p = min(max(close_p, 0.0), action_policy.CLOSE_CAP)
-        probs, self.action = action_policy.distribute(0.0, 1.0 - close_p, 0.0, close_p, closing)
+        # SELL: how close the trade is to its profit-taking scale-out (sell half at +1R).
+        # BUY stays 0: the engine never adds to a position.
+        scale = 0.0 if pos.get("scaled_out") else profit_manager.progress(pos, price)
+        probs, self.action = action_policy.distribute(0.0, max(0.0, 1.0 - close_p - scale), scale, close_p, closing)
         self.buy_prob, self.hold_prob = probs["BUY"], probs["HOLD"]
         self.sell_prob, self.close_prob = probs["SELL"], probs["CLOSE"]
 
@@ -192,9 +201,21 @@ class PositionSentinelBot:
             sell_qty=self.qty, bot_thesis=self.thesis,
         )
         pos.update(forced_exits.telemetry(self.symbol))
+        r = profit_manager.risk_per_share(pos)
+        pos["sell_plan"] = (
+            f"Scaled out; stop ${self.stop_loss:,.2f} trails the high; target ${self.take_profit:,.2f} closes the rest"
+            if pos.get("scaled_out") else
+            f"Sell {settings.SCALE_OUT_FRACTION:.0%} at +{settings.SCALE_OUT_AT_R:g}R "
+            f"(${self.entry_price + settings.SCALE_OUT_AT_R * r:,.2f}), then stop to breakeven and trail"
+            if r > 0 else pos.get("sell_plan"))
 
         if not closing:
             self.status = "WATCHING"
+            act = profit_manager.plan(pos, price, self.highest_price)
+            if act:
+                self.status = "TAKING_PROFIT" if act["type"] == "scale_out" else "TRAILING"
+                from engine.executor import executor
+                asyncio.create_task(executor.manage_profit(self.symbol, act))
             return
         self.status = "TRIGGERING_EXIT"
         self.exit_reason = reason

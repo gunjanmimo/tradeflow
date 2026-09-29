@@ -6,6 +6,10 @@ import { ManagerChip, ManagerPanel } from './ManagerPanel';
 import { DailyPnlChip, DailyPnlCalculatorModal } from './DailyPnlCalculator';
 import { RLChip, RLPanel } from './RLPanel';
 import { SmartMoneyPanel } from './SmartMoneyPanel';
+import { ScoutPanel } from './ScoutPanel';
+import { DeskPanel } from './DeskPanel';
+import { NewsIngestPanel } from './NewsIngestPanel';
+import { setDisplayTz, clockTime } from './timefmt';
 import { MarketsModal } from './MarketsModal';
 import { HugeiconsIcon } from '@hugeicons/react';
 import { 
@@ -273,6 +277,7 @@ export default function App() {
           }
           lastFrameRef.current = now;
           if (data.server_time) frameAgeRef.current = Math.max(0, Date.now() - data.server_time * 1000);
+          setDisplayTz(data.market_clock?.display_tz);
           setTelemetry(data);
         } catch (e) {
           console.error("WS Parse error", e);
@@ -419,7 +424,7 @@ export default function App() {
             return (
               <div
                 className="hidden min-[2100px]:flex items-center rounded-full bg-white/[0.03] ring-1 ring-white/10 text-xs font-medium"
-                title={stocksLive ? `Stock markets open: ${venues}` : `Stock markets closed · next US open: ${clock.next_us_open || '09:30 AM EST'}`}
+                title={stocksLive ? `Stock markets open: ${venues}` : `Stock markets closed · next US open: ${clock.next_us_open_local || clock.next_us_open || '—'}`}
               >
                 <button type="button" onClick={() => setIsMarketsOpen(true)} className="flex items-center gap-2 pl-3 pr-3 py-1.5 rounded-full hover:bg-white/[0.05] transition-colors">
                   <span className={`w-2 h-2 rounded-full ${!stocksOn ? 'bg-rose-500' : stocksLive ? 'bg-emerald-400 animate-pulse shadow-[0_0_8px] shadow-emerald-400' : 'bg-slate-500'}`} />
@@ -432,6 +437,17 @@ export default function App() {
               </div>
             );
           })()}
+
+          {/* Your clock, and when the US session opens or closes in your timezone */}
+          <div className="hidden sm:flex flex-col items-end leading-tight shrink-0" title={`Times shown in ${clock.display_tz || 'Europe/Paris'}; New York: ${clock.current_time_ny || ''}`}>
+            <span className="font-mono text-sm text-slate-200">{clock.current_time_local || ''}</span>
+            <span className="text-[10px] text-slate-500">
+              {clock.us_session === 'regular'
+                ? `US open · closes ${clock.next_us_close_local || ''}`
+                : clock.us_session === 'pre' ? `US pre-market · opens ${clock.next_us_open_local || ''}`
+                : `US opens ${clock.next_us_open_local || '—'}`}
+            </span>
+          </div>
 
           {/* Right cluster: stat chips + actions */}
           <div className="flex items-center gap-2">
@@ -812,6 +828,9 @@ export default function App() {
         {/* Left Column: Watchlist & Smart-Money Intelligence (7 Cols) */}
         <section className="lg:col-span-7 flex flex-col space-y-6">
 
+          {/* Scout: our own hourly ranking of what to watch today, and the watcher's live read */}
+          <ScoutPanel apiBase={API_BASE} />
+
           {/* Smart-money consensus: only the sources that actually answered this cycle */}
           <div className="bg-[#0f172a]/70 border border-cyan-900/40 rounded-2xl p-5 shadow-xl relative overflow-hidden">
             <div className="flex items-center justify-between mb-4">
@@ -978,6 +997,9 @@ export default function App() {
 
         {/* Right Column: Positions, Real-time Trades & Live Logs (5 Cols) */}
         <section className="lg:col-span-5 flex flex-col space-y-6">
+
+          {/* Trade desk: observer, analyst and critic agents argue every entry before it opens */}
+          <DeskPanel desk={telemetry.desk} apiBase={API_BASE} />
           
           {/* Active Positions Card */}
           <div className="bg-[#0f172a]/70 border border-slate-800 rounded-2xl p-5 shadow-xl">
@@ -1304,25 +1326,39 @@ export default function App() {
                       <span className="font-bold text-slate-200">{tr.symbol}</span>
                       <span className="text-slate-400 text-[11px]">{tr.qty}x @ ${tr.price?.toFixed(2)}</span>
                     </div>
-                    <div className="flex items-center space-x-2 text-right text-[10px]">
-                      {tr.time && (
-                        <span className="text-slate-500 font-mono">
-                          {new Date(tr.time * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                        </span>
-                      )}
-                      {tr.pnl !== undefined ? (
-                        <span className={tr.pnl >= 0 ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
-                          PnL: {tr.pnl >= 0 ? '+' : ''}${tr.pnl.toFixed(2)}
-                        </span>
-                      ) : (
-                        <span className="text-slate-500 font-mono">{tr.mode || 'ALPACA_PAPER'}</span>
-                      )}
-                    </div>
+                    {(() => {
+                      const amount = Number(tr.qty || 0) * Number(tr.price || 0);
+                      const buy = tr.side === 'BUY';
+                      const cost = Number(tr.entry_price || 0) * Number(tr.qty || 0);
+                      const pnlPct = tr.pnl !== undefined && cost > 0 ? (tr.pnl / cost) * 100 : null;
+                      const usd = (v) => `$${Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+                      return (
+                        <div className="flex flex-col items-end text-right leading-tight shrink-0 pl-2" title={tr.exit_reason || ''}>
+                          <span className={`text-[12px] font-bold ${buy ? 'text-emerald-300' : 'text-rose-300'}`}>
+                            {usd(amount)} <span className="font-normal text-[10px] text-slate-400">{buy ? 'bought' : 'sold'}</span>
+                            {tr.partial && <span className="ml-1 text-[9px] px-1 rounded bg-amber-500/15 text-amber-300">PARTIAL</span>}
+                          </span>
+                          <span className="text-[10px] text-slate-500">
+                            {tr.time ? clockTime(tr.time) : ''}
+                            {tr.pnl !== undefined ? (
+                              <span className={`ml-1.5 font-bold ${tr.pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                {tr.pnl >= 0 ? '+' : '-'}{usd(tr.pnl)}{pnlPct !== null ? ` (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)` : ''}
+                              </span>
+                            ) : (
+                              <span className="ml-1.5">{tr.mode || 'ALPACA_PAPER'}</span>
+                            )}
+                          </span>
+                        </div>
+                      );
+                    })()}
                   </div>
                 ))
               )}
             </div>
           </div>
+
+          {/* News ingestion: every headline, its entities and events, and how it was scored */}
+          <NewsIngestPanel news={telemetry.news_log} />
 
           {/* Real-time Engine Event Logs */}
           <div className="bg-[#0f172a]/70 border border-slate-800 rounded-2xl p-4 shadow-xl">
@@ -1334,7 +1370,7 @@ export default function App() {
               {(telemetry.logs || []).slice(-20).reverse().map((log, i) => (
                 <div key={i} className="flex space-x-2 leading-relaxed items-start">
                   <span className="text-slate-600 shrink-0">
-                    {new Date(log.timestamp * 1000).toLocaleTimeString()}
+                    {clockTime(log.timestamp)}
                   </span>
                   <span className={`shrink-0 font-bold ${
                     log.level === 'ORDER_FILLED' || log.level === 'SIGNAL' ? 'text-emerald-400' :

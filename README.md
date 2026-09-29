@@ -182,11 +182,81 @@ curl -X POST localhost:8000/api/daily-pnl/calculator -H 'content-type: applicati
 
 ---
 
+## 🔭 Scout: what to watch today (`scout/`)
+
+Our own stock discovery, with no copy-trading platform in the loop. Every hour the **Scout** agent ranks the stocks worth watching today, in the US and on the world's exchanges, puts the best on the watchlist, and the **Watcher** agent follows each pick live until it is confident enough to trade.
+
+**Pool.** Alpaca's 100 most active stocks and 50 top gainers, every symbol in the last 24 hours of Alpaca news, the 200 stocks Reddit's stock subreddits discuss most (ApeWisdom), StockTwits' trending list, the watchlist, and **what the world's exchanges are trading** (below). It keeps only liquid, exchange-listed common stocks and ADRs: listed on Alpaca, not an ETF, warrant, unit or leveraged product (judged by Alpaca's asset name), not OTC-only, priced ≥ $5, trading ≥ $20M a day, with 60+ sessions of history.
+
+**World exchanges** (`scout/exchanges.py`). Every hour the scout reads the 40 most-traded stocks by value on London, Xetra, Paris, Amsterdam, Zurich, Hong Kong, India (NSE), Tokyo, Korea and Taiwan (TradingView's public screener; `SCOUT_EXCHANGES`). Alpaca executes US listings only, so each one is matched by company name to a US line in Alpaca's asset list: an ADR (HSBC Holdings → HSBC, HDFC Bank → HDB), an ordinary-share listing (SAP SE → SAP) or a New York registry share (ASML). A match counts only if the US line reads as a foreign issuer's, or SEC EDGAR says its issuer is foreign, so Merck KGaA is never traded as Merck & Co. Nothing is hard-coded. Hot stocks with no US line (Reliance, Rheinmetall, Samsung) or only an OTC one (Tencent, Nestlé, Siemens: no prices on the free data plan) are shown with the reason, but are not traded. The best-scoring tradable stock of each exchange gets a reserved watch slot (1 per exchange, 6 in all, score ≥ 0.45), because foreign stocks get little US news and Reddit attention.
+
+| Component | Weight | Inputs |
+|---|---|---|
+| Performance | 30% | Risk-adjusted 20-day momentum, 5- and 60-day returns, volume surge, 20/50-day trend, distance from the 60-day high (cross-sectional ranks) |
+| Today | 15% | Today's % move (pre-market before the open) and volume pace; it doesn't vote until a trade prints today |
+| Home market | 15% | Foreign stocks only: the move (60%) and trading activity (40%) on its own exchange today. Asia closes before New York opens, so this is fresh information for the ADR |
+| News | 20% | Headline count in the last day and their tone (Jev/Laya, scored for the 30 best candidates) |
+| Discussion | 20% | Reddit mentions and their 24-hour growth, StockTwits trending place |
+
+A missing component doesn't vote, and the others are renormalized.
+
+**Picks.** The top 10 scoring ≥ 0.55 go on the watchlist. A pick stays while it ranks in the top 20, or while it's held. A dropped pick leaves the watchlist only if the scout added it. If you remove a pick yourself, it isn't picked again that day.
+
+**Watcher → trade.** Every 5 seconds each pick gets a confidence score from its scout score (30%), the intraday trend (25%), price vs VWAP (15%), the move since the open (10%), fresh news (15%) and SPY (5%). Some conditions block an entry whatever the confidence: outside the session, the first 15 minutes, a downtrend or fresh reversal, RSI > 75, a wide spread, or bad news. A pick is **ready** once its confidence has held at ≥ 0.65 for 90 seconds. The `scout` strategy buys ready picks (one entry per stock per day, flat by the close) and exits when the confidence drops below 0.40 after 15 minutes. Settings: `SCOUT_*` in `core/config.py`; `SCOUT_TRADING=false` keeps it watch-only.
+
+**Is it any good?** Every ranking is logged to `data/scout/rankings.jsonl` with the pool's prices.
+
+```bash
+python -m scout rank [--tone]      # rank now and print it (does not touch the watchlist)
+python -m scout scorecard          # did the logged top 10 beat the pool, to the close and next close?
+python -m scout backtest           # the performance component alone, on 2 years of daily bars
+```
+
+The backtest (98 curated large caps, 453 days) finds **no edge** in the performance component alone. The top 10 trail the universe by 2.5 bps open-to-close (t = −0.67) and 3.9 bps close-to-close (t = −0.82). News, discussion and today's move can't be rebuilt from history, so the scorecard judges them from the live log.
+
+Dashboard: the **Today's watch** card. API: `/api/scout`, `/api/scout/refresh`.
+
+---
+
+## 💰 Taking profit and protecting positions (`engine/profit_manager.py`)
+
+Measured in R, the trade's own initial risk (entry − initial stop):
+
+- **At +1R**, half the shares are sold and the stop moves to breakeven (+0.05% for costs). The trade can no longer turn into a loss.
+- **After that**, the stop trails the highest price by 1R and only moves up. The original target closes the rest.
+- The stop is held **at the broker**. Entries are real bracket orders, and after a scale-out or a stop raise an OCO (stop + target for the shares left) replaces the old legs. A check every 60 s gives any unprotected position one, so a restart or crash never leaves a position unguarded.
+- A partial sale takes the share count from the broker's live position, never from the engine's copy.
+
+Unlike the removed "harvest", which sold half on *any* uptick and cut winners short, nothing is sold before +1R. Settings: `PROFIT_TAKING_ENABLED`, `SCALE_OUT_AT_R`, `SCALE_OUT_FRACTION`, `TRAIL_DISTANCE_R` in `core/config.py`. The backtester does not model the scale-out yet.
+
+---
+
+## 🧑‍⚖️ Trade desk: agents argue every entry (`desk/`)
+
+No position opens until a committee of agents has watched the stock and argued the trade. The executor refuses any buy without a fresh desk approval (`DESK_REQUIRED`), and that covers the tick-path fallback too.
+
+| Agent | What it does |
+|---|---|
+| **Observer** | Watches for 90 s after a ranked buy signal: price path, VWAP, and whether the strategy keeps signalling. A signal that disappears for 20 s, or is present in under 70% of checks, fades the case. |
+| **Analyst** | `qwen3.5:9b` through Ollama, with reasoning, entirely on the GPU. It reads the case file (`desk/brief.py`: 5-minute candles, momentum, trend, VWAP, daily context, stop and target, headlines with entities, SPY, the scout's rank, and the user's **risk appetite**) and estimates P(target before stop). It is not shown the breakeven, which it anchored on. The reasoning budget is 1,000 tokens; past it, the model answers from its notes. |
+| **Critic** | A **different model**, `qwen3:4b`, split between the VRAM the analyst leaves free (`DESK_CRITIC_NUM_GPU` layers) and RAM, so neither model evicts the other: swapping them costs 1.5–3 minutes a review. It sees the analyst's reasoning but not its probability (small models echoed it back), vetoes only for a concrete problem in the case file, weighs objections by the user's risk dial, and gives its own probability. `gemma4:e2b` and `phi4-mini-reasoning` were tried and echoed the analyst. |
+| **Decision** | The numbers decide, not the models' labels: approved only if the critic approves, the signal is still there, and the mean probability clears the trade's breakeven plus a margin set by the **risk dial** (0.08 at dial 1 down to 0.02 at dial 10), never below 0.40. An approval is good for 180 s within 0.5% of the price. A rejection holds the symbol off for 15 minutes. |
+
+**Risk appetite.** Both agents read the risk dial the user set on the dashboard, live on every case: its label, the loss accepted per trade and per day, today's loss so far, open positions, and what this trade risks and could make. The dial is saved (`data/risk_dial.json`), so a restart keeps it; 4 is the default until it is first set.
+
+On an RTX 3070 laptop a review takes 25–120 s. Everything streams to the dashboard's **Trade desk** card over the telemetry websocket: agent states, each case's stage, the analyst's reasoning as it is written, and every probability against the bar. Expand a verdict to see the objections, the full reasoning and the exact case file.
+
+The probabilities are the models' own estimates, not calibrated odds. Every case, and the P&L of each trade it cleared, goes to `data/desk/cases.jsonl` so they can be checked. If Ollama is unreachable, no case opens and **no entry is made**. API: `/api/desk`, `/api/desk/case/{id}`, `POST /api/desk/review/{symbol}` ("Ask the desk").
+
+**News ingestion.** Every headline the news feed or the scout ingests is logged with its named entities and event keywords (`feeds/news_entities.py`): tickers, companies, regulators, brokers, people, places, amounts, and events such as earnings beat, downgrade or FDA approval, each with its usual direction. The log also records which symbols the headline was scored for, by which backend (Jev/Laya), and how long that took. Extraction is rule-based, so it costs no GPU time. The dashboard shows it in the **News ingestion** box; API `/api/news/log`.
+
+---
+
 ## 🌍 Discovery & Diversification
 
 Discovery finds stocks you don't hold yet. Diversification keeps the book from being one bet. Both are driven by the same 1-10 risk dial.
 
-**Candidate pool** (`engine/discovery.py`). Candidates are kept separate from the watchlist and come from:
+**Candidate pool** (`engine/discovery.py`). It no longer picks the watchlist (the scout does; `DISCOVERY_AUTO_PROMOTE` turns that back on). It stays for manual picks, the smart-money view and the risk report. Candidates come from:
 - SEC Form 4 insider trades and eToro top-investor holdings, for any symbol, not only watched ones.
 - Our own universe screen: GICS sector leaders, US-listed ADRs of UK, European, Chinese, Japanese and Indian companies, and sector and country ETFs.
 

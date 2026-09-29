@@ -2,7 +2,7 @@ import asyncio
 import logging
 import random
 import time
-from typing import Optional
+from typing import Dict, Optional
 from core.config import settings
 from core.state import state
 from core.latency import latency
@@ -34,6 +34,7 @@ class MarketStreamRunner:
         if not settings.ALPACA_API_KEY.startswith("PK_PLACEHOLDER") and settings.ALPACA_API_KEY:
             self._live = True
             self._task = asyncio.create_task(self._run_alpaca_websocket())
+            self._sync_task = asyncio.create_task(self._sync_loop())
         else:
             logger.info("Starting high-frequency simulated market stream (realistic ticks 24/7)...")
             self._task = asyncio.create_task(self._run_simulated_stream())
@@ -42,6 +43,37 @@ class MarketStreamRunner:
         self._running = False
         if self._task:
             self._task.cancel()
+        if getattr(self, "_sync_task", None):
+            self._sync_task.cancel()
+
+    async def sync_subscriptions(self) -> list:
+        """
+        Subscribes every watched, held or context symbol the live stream is not
+        streaming yet; returns the ones added. Symbols put on the watchlist before
+        the stream existed (the scout's first ranking runs at start-up) were
+        silently never subscribed and so never got a price.
+        """
+        if not (self._running and self._live) or self._stock_stream is None:
+            return []
+        import re
+        bars = self._stock_stream._handlers.get("bars") or {}
+        want = set(state.watchlist) | set(state.active_positions) | set(settings.CONTEXT_SYMBOLS)
+        missing = sorted(s for s in want if s not in bars and re.match(r"^[A-Z]{1,5}(\.[A-Z])?$", s))
+        for sym in missing:
+            await self.ensure_stock_subscription(sym)
+        if missing:
+            logger.info(f"Subscribed live bars for {len(missing)} symbol(s) that had none: {', '.join(missing)}")
+        return missing
+
+    async def _sync_loop(self):
+        while self._running:
+            try:
+                await asyncio.sleep(15.0)
+                await self.sync_subscriptions()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"Subscription sync failed: {e}")
 
     async def ensure_stock_subscription(self, symbol: str):
         """
@@ -189,14 +221,7 @@ class MarketStreamRunner:
         """
         Generates simulated ticks for the watchlist when no Alpaca keys are set.
         """
-        base_prices = {
-            "NVDA": 128.50,
-            "AAPL": 224.30,
-            "TSLA": 252.10,
-            "MSFT": 428.80,
-            "PLTR": 42.10,
-            "SPY": 560.00,
-        }
+        base_prices: Dict[str, float] = {}      # every simulated symbol starts at 150
         # One simulated "minute" bar per symbol every few seconds, so the demo
         # moves at a watchable pace. Bars carry consecutive synthetic minutes,
         # started far enough in the past that they never run ahead of the clock.

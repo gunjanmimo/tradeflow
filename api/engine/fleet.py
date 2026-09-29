@@ -3,11 +3,15 @@ The agent fleet. Each agent has one job, its own loop and cadence, and its own
 status card; they hand work on through shared state, never by calling each other,
 so one agent failing leaves the rest running.
 
-  Scout          engine/discovery.py       every 60s   scans US stocks, UK/EU/Asia/India ADRs and
-                                                       ETFs, and smart money (SEC, eToro, StockTwits)
-                                                       into a scored candidate pool
-  Curator        CuratorAgent              every 30s   moves the best candidates onto the watchlist,
-                                                       drops ones that fell away; backfills their bars
+  Scout          scout/service.py          every hour  ranks the stocks worth watching today (past
+                                                       performance, today's move, news, Reddit and
+                                                       StockTwits) and puts the top picks on the watchlist
+  Watcher        scout/watcher.py          every 5s    follows each pick live; a pick is READY once its
+                                                       confidence holds above the entry bar
+  Pool           engine/discovery.py       every 60s   scores smart money (SEC, eToro) and the curated
+                                                       universe for manual picks and the risk report
+  Curator        CuratorAgent              every 30s   puts smart-money buys on the watchlist (and the
+                                                       pool's best when DISCOVERY_AUTO_PROMOTE is on)
   Trend analyst  TrendAnalystAgent         every 1s    reads 1-minute bars + daily bars for every
                                                        watched and held symbol (engine/trend.py);
                                                        logs trend flips and reversals
@@ -28,79 +32,10 @@ from typing import Any, Dict, List, Optional
 from core.config import settings
 from core.state import state, TradeDecision
 from core.minute_bars import minute_bars
+from engine.agent import Agent
 from engine.trend import board as trend_board, analyze
 
 logger = logging.getLogger("tradeflow.fleet")
-
-
-class Agent:
-    name = "agent"
-    role = ""
-
-    def __init__(self):
-        self.running = False
-        self._task: Optional[asyncio.Task] = None
-        self.cycles = 0
-        self.last_at = 0.0
-        self.last_ms = 0.0
-        self.error: Optional[str] = None
-        self.summary = "starting"
-        self.last_action: Optional[Dict[str, Any]] = None
-
-    @property
-    def interval(self) -> float:
-        return 5.0
-
-    @property
-    def enabled(self) -> bool:
-        return True
-
-    async def start(self):
-        if not self.enabled:
-            self.summary = "disabled"
-            return
-        self.running = True
-        self._task = asyncio.create_task(self._loop())
-
-    async def stop(self):
-        self.running = False
-        if self._task:
-            self._task.cancel()
-
-    async def _loop(self):
-        while self.running:
-            t0 = time.perf_counter()
-            try:
-                await self.step()
-                self.error = None
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                self.error = f"{type(e).__name__}: {e}"
-                logger.error(f"{self.name} failed: {e}", exc_info=True)
-            self.cycles += 1
-            self.last_at = time.time()
-            self.last_ms = (time.perf_counter() - t0) * 1000
-            try:
-                await asyncio.sleep(self.interval)
-            except asyncio.CancelledError:
-                break
-
-    async def step(self):
-        raise NotImplementedError
-
-    def act(self, symbol: str, action: str, reason: str):
-        self.last_action = {"symbol": symbol, "action": action, "reason": reason, "at": time.time()}
-
-    def card(self) -> Dict[str, Any]:
-        stalled = self.running and self.last_at and time.time() - self.last_at > max(15.0, 5 * self.interval)
-        return {
-            "name": self.name, "role": self.role,
-            "state": "stalled" if stalled else ("running" if self.running else self.summary),
-            "summary": self.summary, "cycles": self.cycles, "interval_s": self.interval,
-            "last_at": self.last_at or None, "cycle_ms": round(self.last_ms, 1),
-            "error": self.error, "last_action": self.last_action,
-        }
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +100,7 @@ class TrendAnalystAgent(Agent):
 
 class CuratorAgent(Agent):
     name = "Curator"
-    role = "Moves the scout's best candidates onto the watchlist and drops fading ones"
+    role = "Puts smart-money buys (and the pool's best, if enabled) on the watchlist"
 
     @property
     def interval(self) -> float:
@@ -220,8 +155,12 @@ class CuratorAgent(Agent):
 class Fleet:
     def __init__(self):
         from engine.learner import learner
+        from scout.service import scout
+        from scout.watcher import watcher
         self.trend = TrendAnalystAgent()
         self.curator = CuratorAgent()
+        self.scout = scout
+        self.watcher = watcher
         self.learner = learner
 
     async def start(self):
@@ -236,13 +175,23 @@ class Fleet:
         self.trend._backfill_at = time.time()
         await self.trend.start()
         await self.curator.start()
+        await self.scout.start()
+        await self.watcher.start()
+        from desk.desk import desk
+        await desk.start()
+        from feeds.spreads import spreads
+        await spreads.start()
         await portfolio_manager.start()
         await self.learner.start()
 
     async def stop(self):
         from engine.portfolio_manager import portfolio_manager
-        for a in (self.learner, self.curator, self.trend):
+        for a in (self.learner, self.watcher, self.scout, self.curator, self.trend):
             await a.stop()
+        from desk.desk import desk
+        await desk.stop()
+        from feeds.spreads import spreads
+        await spreads.stop()
         await portfolio_manager.stop()
 
     def snapshot(self) -> Dict[str, Any]:
@@ -250,8 +199,8 @@ class Fleet:
         from engine.portfolio_manager import portfolio_manager
         from engine.sentinel_agent import sentinel_registry
         d = discovery.status()
-        scout = {
-            "name": "Scout", "role": "Scans markets and smart money into a scored candidate pool",
+        pool = {
+            "name": "Pool", "role": "Scores smart money and the curated universe for manual picks",
             "state": ("running" if d["enabled"] else "disabled") if not d["last_error"] else "error",
             "summary": f"{d['candidates']} candidates, {d['scored']} scored",
             "cycles": None, "interval_s": settings.DISCOVERY_INTERVAL_SECONDS,
@@ -274,9 +223,18 @@ class Fleet:
             "cycles": None, "interval_s": 0, "last_at": None, "cycle_ms": None,
             "error": None, "last_action": None,
         }
+        from desk.desk import desk
+        desk_cards = [{"name": f"Desk {a['name'].lower()}",
+                       "role": {"Observer": "Watches every buy signal before anyone decides",
+                                "Analyst": f"Reasons over the case file ({a['model']})",
+                                "Critic": f"Argues against the trade, may veto ({a['model']})",
+                                "Decision": "Approves only when both agree and the odds beat breakeven"}[a["name"]],
+                       "state": a["state"], "summary": a["summary"], "cycles": None, "interval_s": 1.0,
+                       "last_at": None, "cycle_ms": None, "error": None, "last_action": None}
+                      for a in desk.agents()] if desk.enabled else []
         return {
-            "agents": [scout, self.curator.card(), self.trend.card(), trader, sentinels,
-                       self.learner.card()],
+            "agents": [self.scout.card(), self.watcher.card(), pool, self.curator.card(),
+                       self.trend.card(), trader, *desk_cards, sentinels, self.learner.card()],
             "trends": {s: r.brief() for s, r in trend_board.reads.items()},
             "bars": minute_bars.status(),
         }

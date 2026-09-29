@@ -99,7 +99,8 @@ class DecisionEngine:
         avg_price = float(pos.get("avg_entry_price", price))
 
         # One shared bracket derivation; repairs in place if missing or degenerate.
-        if not brackets.is_valid(avg_price, pos.get("stop_loss"), pos.get("take_profit")):
+        if not brackets.is_valid(avg_price, pos.get("stop_loss"), pos.get("take_profit"),
+                                 raised=bool(pos.get("scaled_out"))):
             brackets.ensure(pos, price=price, atr=quant.atr if quant else None)
         stop_loss = pos.get("stop_loss")
         take_profit = pos.get("take_profit")

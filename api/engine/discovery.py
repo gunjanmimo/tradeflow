@@ -5,8 +5,7 @@ Where candidates come from
   - Smart money: SEC Form 4 insider trades and eToro top-investor holdings, for
     ANY symbol (the aggregator used to throw away everything off the watchlist,
     so it could re-score what we already followed but never discover anything).
-  - Our own universe screen: GICS sector leaders, US-listed ADRs of UK, European,
-    Chinese, Japanese and Indian companies, and sector/country ETFs.
+  - The watchlist, which the scout (scout/) fills from what the markets surface.
 
 How a candidate is scored (each component 0..1; missing components do not vote)
   smart money       30%  insider + copy-trader conviction (bearish counts against)
@@ -32,7 +31,7 @@ import numpy as np
 from core.config import settings
 from core.state import state
 from core.universe import (
-    universe, curated_symbols, benchmark_etfs, SECTOR_ETF, DIVERSIFIED,
+    universe, benchmark_etfs, SECTOR_ETF, DIVERSIFIED,
 )
 from engine.diversification import diversification, budget_base
 from feeds.daily_bars import daily_bars
@@ -142,9 +141,8 @@ class DiscoveryService:
         trends = dict(trend_aggregator.aggregated_trends)
         now = time.time()
 
-        # 1. Pool: universe screen + every symbol any smart-money source mentioned.
-        for sym in curated_symbols():
-            self._touch(sym, "Universe screen", now)
+        # 1. Pool: the watchlist (the scout's discoveries) + every symbol any
+        # smart-money source mentioned. No fixed list of stocks is screened.
         for sym in state.watchlist:
             self._touch(sym, "Watchlist", now)
         for sym, trend in trends.items():

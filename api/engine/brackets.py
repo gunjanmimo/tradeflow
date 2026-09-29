@@ -56,7 +56,8 @@ def derive(price: float, atr: Optional[float] = None) -> Tuple[float, float, flo
     return stop_loss, take_profit, distance
 
 
-def is_valid(price: float, stop_loss: Optional[float], take_profit: Optional[float]) -> bool:
+def is_valid(price: float, stop_loss: Optional[float], take_profit: Optional[float],
+             raised: bool = False) -> bool:
     """
     A bracket is only usable if it actually brackets the price. This rejects the
     degenerate cases the old code produced: a negative stop (unreachable, so the
@@ -72,6 +73,10 @@ def is_valid(price: float, stop_loss: Optional[float], take_profit: Optional[flo
         return False
     if sl <= 0 or tp <= 0:
         return False
+    if raised:
+        # After a profit-taking scale-out the stop sits at or above the entry
+        # (breakeven, then trailing): that is protection, not a broken bracket.
+        return sl < tp
     return sl < price < tp
 
 
@@ -89,7 +94,7 @@ def ensure(position: Dict, price: Optional[float] = None, atr: Optional[float] =
 
     sl, tp = position.get("stop_loss"), position.get("take_profit")
 
-    if not is_valid(entry, sl, tp):
+    if not is_valid(entry, sl, tp, raised=bool(position.get("scaled_out"))):
         new_sl, new_tp, distance = derive(entry, atr)
         if sl is not None or tp is not None:
             logger.warning(

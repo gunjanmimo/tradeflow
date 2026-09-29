@@ -40,9 +40,11 @@ class CostModel:
     @classmethod
     def from_live(cls, symbols=None, floor_half_spread_bps: float = 1.0,
                   slippage_bps: float = 1.0) -> "CostModel":
-        """Median live half-spread across symbols, from the quote stream's estimate."""
+        """Median live half-spread across symbols, from the spread monitor (feeds/spreads.py)."""
         from core.state import state
-        vals = [v for s, v in state.spread_estimate.items() if symbols is None or s in symbols]
+        from feeds.spreads import spreads
+        syms = [s for s in state.spread_estimate if symbols is None or s in symbols]
+        vals = [v for v in (spreads.estimate(s)[0] for s in syms) if v is not None]
         if not vals:
             return cls(slippage_bps=slippage_bps)
         vals.sort()

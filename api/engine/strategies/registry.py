@@ -19,6 +19,7 @@ from engine.strategies.library import LIBRARY
 from engine.strategies.adaptive import AdaptiveStrategy
 from engine.strategies.rl_ppo import RLPolicyStrategy
 from engine.strategies.smart_money import SmartMoneyStrategy
+from engine.strategies.scout import ScoutStrategy
 
 logger = logging.getLogger("tradeflow.strategies")
 
@@ -29,6 +30,7 @@ _STRATEGIES: Dict[str, Strategy] = {
     s.name: s for s in (
         RLPolicyStrategy(),
         SmartMoneyStrategy(),
+        ScoutStrategy(),
         NewsCatalystStrategy(),
         StockScoreStrategy(),
         MeanReversionStrategy(),
@@ -63,13 +65,16 @@ def resolve(symbol: str, class_defaults: Dict[str, str],
             overrides: Dict[str, str]) -> Strategy:
     """
     The override for this symbol; else smart_money for a tradable smart-money
-    BUY (settings.SMART_MONEY_TRADING); else the configured default.
+    BUY (settings.SMART_MONEY_TRADING); else scout for a scout pick
+    (settings.SCOUT_ENABLED); else the configured default.
     """
     name = overrides.get(symbol)
     if name and name in _STRATEGIES:
         return _STRATEGIES[name]
     if _is_smart_money_buy(symbol):
         return _STRATEGIES["smart_money"]
+    if _is_scout_pick(symbol):
+        return _STRATEGIES["scout"]
     name = class_defaults.get(EQUITY) or DEFAULT_BY_CLASS[EQUITY]
     strat = _STRATEGIES.get(name)
     if strat is None:
@@ -87,6 +92,14 @@ def _is_smart_money_buy(symbol: str) -> bool:
         return smart_money.verdict(symbol)["verdict"] == "BUY" and smart_money.tradable(symbol) is None
     except Exception:
         return False
+
+
+def _is_scout_pick(symbol: str) -> bool:
+    from core.config import settings
+    if not settings.SCOUT_ENABLED:
+        return False
+    from scout.service import scout
+    return scout.is_pick(symbol)
 
 
 def for_position(symbol: str, position: Optional[Dict], class_defaults: Dict[str, str],

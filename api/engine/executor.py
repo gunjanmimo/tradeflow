@@ -3,12 +3,13 @@ import asyncio
 import math
 import time
 import uuid
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from core.config import settings
 from core.state import state, TradeDecision
 from engine.risk_guard import risk_guard
 from core.latency import latency
 from engine import brackets
+from engine import profit_manager
 from engine.fills import fills
 
 logger = logging.getLogger("tradeflow.executor")
@@ -21,13 +22,51 @@ ENTRY_CONTEXT_KEYS = frozenset({
     "consensus_score", "conviction_tier", "composite_conviction", "entry_rsi",
     "entry_spread", "entry_atr_pct", "stop_pct", "buy_prob", "entry_reason",
     "entry_strategy", "entry_regime", "extended_hours", "brackets_in_engine",
+    "desk_case", "desk_p", "initial_stop", "scaled_out",
 })
+
+def pair_fills(fills: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Gives reloaded broker sells their P&L by matching them to earlier buys of the
+    same symbol, first in first out: pnl = sum((sell - buy price) x matched qty),
+    entry_price = the matched buys' average. A sell that sold more than the
+    history shows bought (its buy is older than the reload) gets no P&L rather
+    than a guessed one. A sell that leaves shares open is marked partial.
+    """
+    lots: Dict[str, List[List[float]]] = {}             # symbol -> [[qty, price], ...] oldest first
+    for f in sorted(fills, key=lambda r: r.get("time") or 0.0):
+        sym, qty, price = f.get("symbol"), float(f.get("qty") or 0.0), float(f.get("price") or 0.0)
+        if qty <= 0 or price <= 0:
+            continue
+        book = lots.setdefault(sym, [])
+        if f.get("side") == "BUY":
+            book.append([qty, price])
+            continue
+        need, cost, matched = qty, 0.0, 0.0
+        while need > 1e-9 and book:
+            take = min(need, book[0][0])
+            cost += take * book[0][1]
+            matched += take
+            need -= take
+            book[0][0] -= take
+            if book[0][0] <= 1e-9:
+                book.pop(0)
+        if need > 1e-9:
+            continue                                    # bought before the reloaded history
+        entry = cost / matched
+        f["entry_price"] = round(entry, 4)
+        f["pnl"] = round((price - entry) * matched, 2)
+        if book:
+            f["partial"] = True
+    return fills
+
 
 class AlpacaExecutor:
     """
     Order router and position sync for the Alpaca Trading API.
-    Entries are bracket orders (market entry + stop-loss + take-profit legs);
-    exits are full closes. There are no partial sells or adds.
+    Entries are bracket orders (market entry + stop-loss + take-profit legs).
+    Exits are full closes, except the profit-taking scale-out (engine/profit_manager.py):
+    part of a winner is sold at +1R and the rest protected by a broker OCO. No adds.
     """
     def __init__(self):
         self.trading_client = None
@@ -229,7 +268,8 @@ class AlpacaExecutor:
                 try:
                     from alpaca.trading.requests import GetOrdersRequest
                     from alpaca.trading.enums import QueryOrderStatus
-                    req = GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=30)
+                    # Enough history that a reloaded sell usually still has its buy (pair_fills).
+                    req = GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=100)
                     orders = self.trading_client.get_orders(req)
                     recent = []
                     for o in reversed(orders):
@@ -250,7 +290,7 @@ class AlpacaExecutor:
                     return []
 
             self.alpaca_tradable_symbols = await loop.run_in_executor(None, load_assets)
-            past_orders = await loop.run_in_executor(None, load_recent_orders)
+            past_orders = pair_fills(await loop.run_in_executor(None, load_recent_orders))
             for o in past_orders:
                 state.recent_trades.append(o)
 
@@ -301,7 +341,13 @@ class AlpacaExecutor:
                 # flat -2%/+4% this path used to stamp onto every position.
                 sl = old_pos.get("stop_loss")
                 tp = old_pos.get("take_profit")
-                if not brackets.is_valid(avg_entry, sl, tp):
+                saved = None if old_pos else profit_manager.meta.get(normalized_sym)
+                if saved and brackets.is_valid(avg_entry, saved.get("stop_loss"), saved.get("take_profit"),
+                                               raised=bool(saved.get("scaled_out"))):
+                    # A restart: keep the stop the profit manager had raised, not a fresh one.
+                    sl, tp = float(saved["stop_loss"]), float(saved["take_profit"])
+                raised = bool(old_pos.get("scaled_out") or (saved or {}).get("scaled_out"))
+                if not brackets.is_valid(avg_entry, sl, tp, raised=raised):
                     q = state.quant_metrics.get(normalized_sym)
                     sl, tp, _dist = brackets.derive(avg_entry, q.atr if q else None)
                 invested = old_pos.get("invested_dollars") or round(qty * avg_entry, 2)
@@ -315,6 +361,9 @@ class AlpacaExecutor:
                 # context (and the position's entry strategy) on the next sync.
                 carried = {k: v for k, v in old_pos.items() if k in ENTRY_CONTEXT_KEYS}
                 merged_ctx = {**ctx, **carried}
+                if saved:
+                    merged_ctx.setdefault("initial_stop", saved.get("initial_stop"))
+                    merged_ctx.setdefault("scaled_out", saved.get("scaled_out", False))
 
                 new_positions[normalized_sym] = {
                     **merged_ctx,
@@ -397,6 +446,20 @@ class AlpacaExecutor:
                 state.log_event("RISK_REJECT", f"Cannot buy {symbol}: {reason}")
             return
 
+        # 1b. The trade desk (desk/): no buy goes out without a fresh approval from
+        # the observer, analyst and critic. This covers the manager and the tick path.
+        from desk.desk import desk
+        tick0 = state.latest_prices.get(symbol)
+        cleared, desk_case = desk.clearance(symbol, tick0.price if tick0 else None)
+        if not cleared:
+            key = (symbol, "desk")
+            now = time.time()
+            if now - self._reject_logged.get(key, 0.0) >= 60.0:
+                self._reject_logged[key] = now
+                state.log_event("DESK_BLOCK", f"Not buying {symbol}: {desk_case}")
+            return
+        desk_p = (desk.cleared.get(symbol) or {}).get("decision", {}).get("p_final")
+
         self.pending_orders.add(symbol)
         try:
             tick = state.latest_prices.get(symbol)
@@ -464,6 +527,8 @@ class AlpacaExecutor:
                 # The strategy whose thesis this trade is; its exit rules govern it.
                 "entry_strategy": entry_strategy,
                 "entry_regime": gate.get("regime"),
+                "desk_case": desk_case or None,
+                "desk_p": desk_p,
             }
 
             t0 = time.time()
@@ -504,13 +569,14 @@ class AlpacaExecutor:
                     "mode": mode_tag
                 })
                 state.log_event("ORDER_FILLED", f"[{mode_tag}] BUY {qty}x {symbol} @ ${tick.price:.2f} (SL: ${stop_loss}, TP: ${take_profit})")
+                desk.executed(symbol, {"qty": qty, "price": tick.price, "mode": mode_tag})
                 return
 
             # Real Alpaca API execution
             from alpaca.trading.requests import (
                 MarketOrderRequest, LimitOrderRequest, TakeProfitRequest, StopLossRequest,
             )
-            from alpaca.trading.enums import OrderSide, TimeInForce
+            from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
             from core.market_hours import us_session, PRE
 
             # Tagged so the engine can tell its own orders from manual ones.
@@ -541,12 +607,17 @@ class AlpacaExecutor:
                 self.extended_order_ids.add(client_order_id)
                 entry_context["extended_hours"] = True
             else:
-                # Equities use broker-native bracket order
+                # Equities use broker-native bracket order. order_class is what
+                # makes it one: without it Alpaca took a plain market order and
+                # silently dropped both legs, so until 2026-09-29 no stop ever sat
+                # at the broker and a restart left positions unprotected.
+                # Brackets need whole shares; sizing only produces whole shares.
                 req = MarketOrderRequest(
                     symbol=symbol,
-                    qty=qty,
+                    qty=int(qty),
                     side=OrderSide.BUY,
                     time_in_force=TimeInForce.GTC,
+                    order_class=OrderClass.BRACKET,
                     client_order_id=client_order_id,
                     take_profit=TakeProfitRequest(limit_price=round(take_profit, 2)),
                     # The broker holds the same stop the sentinel enforces, so
@@ -584,6 +655,7 @@ class AlpacaExecutor:
                 "mode": "ALPACA_PAPER"
             })
             state.log_event("ORDER_SUBMITTED", f"Alpaca BUY {qty}x {symbol} submitted in {latency_ms:.1f}ms (ID: {order.id})")
+            desk.executed(symbol, {"qty": qty, "price": tick.price, "order_id": str(order.id)})
         except Exception as e:
             err_str = str(e)
             self.inflight_notional.pop(symbol, None)
@@ -723,6 +795,172 @@ class AlpacaExecutor:
                 state.log_event("ORDER_ERROR",
                                 f"Failed to close {symbol} (attempt {n}), retrying in {wait:.0f}s: {err_str}")
 
+    # ------------------------------------------------------------------
+    # Profit-taking (engine/profit_manager.py) and broker-side protection
+    # ------------------------------------------------------------------
+
+    async def manage_profit(self, symbol: str, act: Dict[str, Any]):
+        """Carries out the profit manager's plan: a scale-out, or a raised stop."""
+        from core.market_hours import us_session, REGULAR
+        busy = getattr(self, "profit_inflight", None)
+        if busy is None:
+            busy = self.profit_inflight = set()
+        if (symbol in busy or symbol in self.closing_orders or symbol in self.pending_exits
+                or symbol not in state.active_positions):
+            return
+        pos = state.active_positions[symbol]
+        simulated = self.is_mock_mode or pos.get("mode") in ("SIMULATED", "PAPER_SIMULATED")
+        if not simulated and us_session() != REGULAR:
+            return          # market orders and OCOs are regular-session only
+        busy.add(symbol)
+        try:
+            if act["type"] == "scale_out":
+                await self._scale_out(symbol, pos, act, simulated)
+            else:
+                await self._raise_stop(symbol, pos, float(act["new_stop"]), simulated)
+        except Exception as e:
+            logger.error(f"Profit-taking for {symbol} failed: {e}", exc_info=True)
+            state.log_event("ORDER_ERROR", f"Profit-taking for {symbol} failed: {e}")
+        finally:
+            busy.discard(symbol)
+
+    async def _scale_out(self, symbol: str, pos: Dict[str, Any], act: Dict[str, Any], simulated: bool):
+        tick = state.latest_prices.get(symbol)
+        price = tick.price if tick else float(pos.get("current_price") or pos["avg_entry_price"])
+        entry = float(pos["avg_entry_price"])
+        new_stop = float(act["new_stop"])
+        tp = float(pos["take_profit"])
+        sold = 0.0
+        if simulated:
+            qty = float(pos["qty"])
+            sold = math.floor(qty * act["fraction"])
+            if sold >= 1 and qty - sold >= 1:
+                pos["qty"] = qty - sold
+                state.account_info["cash"] += round(sold * price, 2)
+        else:
+            loop = asyncio.get_running_loop()
+            sold, order_id = await loop.run_in_executor(None, self._scale_out_sync, symbol, act["fraction"],
+                                                        new_stop, tp)
+            if sold:
+                pos["qty"] = float(pos["qty"]) - sold
+        if sold:
+            pnl = round((price - entry) * sold, 2)
+            state.book_realized_pnl(symbol, pnl)
+            part = {**pos, "qty": sold, "dollar_risk": round(max(0.0, entry - float(pos.get("initial_stop") or
+                                                                                     pos["stop_loss"])) * sold, 2)}
+            rec = self._record_closed_trade(symbol, part, price, pnl, TradeDecision(
+                symbol=symbol, action="SELL", reason=f"Profit-taking: sold {sold:g} at +{act['gain_r']:.2f}R"))
+            rec["partial"] = True          # the same record is the row in Recent fills
+        pos["scaled_out"] = True
+        pos["stop_loss"] = new_stop
+        pos["dollar_risk"] = round(max(0.0, entry - new_stop) * float(pos["qty"]), 2)
+        profit_manager.meta.put(symbol, initial_stop=pos.get("initial_stop"), scaled_out=True, stop_loss=new_stop,
+                        take_profit=tp)
+        self._stop_sent = getattr(self, "_stop_sent", {})
+        self._stop_sent[symbol] = (new_stop, time.time())
+        state.log_event("PROFIT", f"{symbol} at +{act['gain_r']:.2f}R: "
+                                  + (f"sold {sold:g} shares (~${(price - entry) * sold:+,.2f}), " if sold else
+                                     "too few shares to split, ")
+                                  + f"stop raised to breakeven ${new_stop:,.2f} for the rest; target ${tp:,.2f}")
+
+    def _scale_out_sync(self, symbol: str, fraction: float, new_stop: float, tp: float):
+        """Sells part of the live position, then protects the rest with an OCO. Runs in the sync thread."""
+        from alpaca.trading.requests import MarketOrderRequest
+        from alpaca.trading.enums import OrderSide, TimeInForce
+        self._cancel_open_orders(symbol)             # frees the shares the bracket legs hold
+        held = float(self.trading_client.get_open_position(symbol).qty)   # the broker's, never our copy
+        sell = math.floor(held * fraction)
+        order_id = None
+        if sell >= 1 and held - sell >= 1:
+            order = self.trading_client.submit_order(MarketOrderRequest(
+                symbol=symbol, qty=sell, side=OrderSide.SELL, time_in_force=TimeInForce.DAY,
+                client_order_id=f"{ORDER_ID_PREFIX}{uuid.uuid4().hex[:20]}"))
+            order_id = str(order.id)
+            deadline = time.time() + 5.0              # the OCO must cover only what is left
+            while time.time() < deadline:
+                time.sleep(0.25)
+                o = self.trading_client.get_order_by_id(order.id)
+                if str(getattr(o, "status", "")).lower().endswith("filled"):
+                    break
+        else:
+            sell = 0
+        try:
+            self._place_oco(symbol, new_stop, tp)
+        except Exception as e:
+            # The shares are already sold: this must not undo the scale-out's
+            # bookkeeping (it would sell half again). ensure_broker_protection
+            # retries the OCO within BROKER_PROTECTION_CHECK_SECONDS; the engine
+            # enforces the stop meanwhile.
+            logger.warning(f"{symbol}: protective OCO after the scale-out failed: {e}")
+        return float(sell), order_id
+
+    async def _raise_stop(self, symbol: str, pos: Dict[str, Any], new_stop: float, simulated: bool):
+        old = float(pos["stop_loss"])
+        if new_stop <= old:
+            return
+        pos["stop_loss"] = new_stop
+        profit_manager.meta.put(symbol, initial_stop=pos.get("initial_stop"), scaled_out=bool(pos.get("scaled_out")),
+                        stop_loss=new_stop, take_profit=float(pos["take_profit"]))
+        state.log_event("PROFIT", f"{symbol}: trailing stop raised ${old:,.2f} -> ${new_stop:,.2f}")
+        if simulated:
+            return
+        self._stop_sent = getattr(self, "_stop_sent", {})
+        last = self._stop_sent.get(symbol, (0.0, 0.0))
+        if time.time() - last[1] < settings.BROKER_STOP_UPDATE_SECONDS:
+            return          # the engine enforces the new stop at once; the broker copy catches up
+        self._stop_sent[symbol] = (new_stop, time.time())
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._protect_sync, symbol, new_stop, float(pos["take_profit"]))
+
+    def _protect_sync(self, symbol: str, stop: float, tp: float):
+        self._cancel_open_orders(symbol)
+        self._place_oco(symbol, stop, tp)
+
+    def _place_oco(self, symbol: str, stop: float, tp: float):
+        """A broker-held stop + target (one cancels the other) for every whole share held."""
+        from alpaca.trading.requests import LimitOrderRequest, TakeProfitRequest, StopLossRequest
+        from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
+        held = int(float(self.trading_client.get_open_position(symbol).qty))
+        if held < 1 or not (0 < stop < tp):
+            return
+        self.trading_client.submit_order(LimitOrderRequest(
+            symbol=symbol, qty=held, side=OrderSide.SELL, time_in_force=TimeInForce.GTC,
+            order_class=OrderClass.OCO, limit_price=round(tp, 2),
+            take_profit=TakeProfitRequest(limit_price=round(tp, 2)),
+            stop_loss=StopLossRequest(stop_price=round(stop, 2)),
+            client_order_id=f"{ORDER_ID_PREFIX}{uuid.uuid4().hex[:20]}"))
+
+    async def ensure_broker_protection(self):
+        """
+        Every live position has a stop at the broker, so a restart or a crash never
+        leaves it unprotected. Positions opened before brackets were real (and any
+        whose orders were cancelled) get an OCO with the engine's current stop.
+        """
+        from core.market_hours import us_session, REGULAR
+        if self.is_mock_mode or not self.trading_client or us_session() != REGULAR:
+            return
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+        loop = asyncio.get_running_loop()
+        live = {s: p for s, p in state.active_positions.items() if p.get("mode") == "ALPACA_PAPER"
+                and s not in self.closing_orders and s not in self.pending_exits
+                and s not in getattr(self, "profit_inflight", set())}
+        if not live:
+            return
+        open_orders = await loop.run_in_executor(None, lambda: self.trading_client.get_orders(
+            GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=list(live))))
+        covered = {o.symbol for o in open_orders if "sell" in str(o.side).lower()}
+        for sym, pos in live.items():
+            if sym in covered:
+                continue
+            try:
+                await loop.run_in_executor(None, self._place_oco, sym, float(pos["stop_loss"]),
+                                           float(pos["take_profit"]))
+                state.log_event("PROTECT", f"{sym}: placed a broker stop ${float(pos['stop_loss']):,.2f} / "
+                                           f"target ${float(pos['take_profit']):,.2f} (it had none at the broker)")
+            except Exception as e:
+                logger.warning(f"Could not protect {sym} at the broker: {e}")
+
     @staticmethod
     def _max_close_wait(decision: TradeDecision) -> float:
         """Longest a failed or unfilled close may sit before it is tried again."""
@@ -858,6 +1096,13 @@ class AlpacaExecutor:
         record["entry_regime"] = pos.get("entry_regime")
         record["bot_id"] = pos.get("bot_id")
         record["opened_at"] = pos.get("opened_at")
+        record["desk_case"] = pos.get("desk_case")
+        record["desk_p"] = pos.get("desk_p")
+        try:
+            from desk.desk import desk
+            desk.closed(record)
+        except Exception as e:
+            logger.debug(f"Could not log the desk outcome: {e}")
         try:
             from memory.agent_memory import agent_memory
             if agent_memory.enabled:
@@ -885,6 +1130,10 @@ class AlpacaExecutor:
                         self._mark_task = asyncio.create_task(self._run_mark_loop())
                 self.book_vanished_positions()
                 fills.apply()
+                if time.time() - getattr(self, "_protect_at", 0.0) >= settings.BROKER_PROTECTION_CHECK_SECONDS:
+                    self._protect_at = time.time()
+                    await self.ensure_broker_protection()
+                    profit_manager.meta.drop_except(state.active_positions)
                 state.roll_trading_day_if_needed()
                 state.update_peak_equity()
                 from core.pnl_ledger import pnl_ledger

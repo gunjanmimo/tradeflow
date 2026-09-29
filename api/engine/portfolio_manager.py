@@ -190,7 +190,14 @@ class PortfolioManager:
             if now - self._attempted.get(sym, 0.0) < settings.MANAGER_RETRY_SECONDS:
                 skip("retry wait", "entry recently refused")
                 continue
-            decision = decision_engine.evaluate(sym, quant, state.get_sentiment(sym))
+            # One symbol's failure is that symbol's problem: it used to abort the
+            # whole cycle, so a single bad read stopped every entry.
+            try:
+                decision = decision_engine.evaluate(sym, quant, state.get_sentiment(sym))
+            except Exception as e:
+                logger.error(f"Entry evaluation failed for {sym}: {type(e).__name__}: {e}", exc_info=True)
+                skip("error", f"evaluation error: {type(e).__name__}")
+                continue
             row["buy_prob"] = round(float(decision.buy_prob), 3)
             if decision.action != "BUY":
                 gate = state.last_gate_detail.get(sym) or {}
@@ -266,6 +273,11 @@ class PortfolioManager:
         blocked: Counter = Counter()
 
         cands = self._gather(now, blocked)
+        try:
+            from engine.thoughts import thoughts
+            thoughts.update(self.watch, now)      # the dashboard's view of what the agents think
+        except Exception as e:
+            logger.debug(f"Thought stream update failed: {e}")
         self._shadow_rl()
         await asyncio.sleep(0)
 
@@ -283,6 +295,12 @@ class PortfolioManager:
 
         entered: List[Dict[str, Any]] = []
         ranked = self._rank(cands, blocked)
+        # The trade desk watches and argues every ranked signal; only what it has
+        # approved is deployed (desk/desk.py). Paused, nothing is sent for review.
+        reviewing = active or settings.DESK_REVIEW_WHEN_PAUSED
+        all_ranked = ranked
+        if reviewing:
+            ranked = self._through_desk(ranked, blocked)
 
         if active:
             for _ in range(settings.MANAGER_MAX_ENTRIES_PER_CYCLE):
@@ -310,15 +328,33 @@ class PortfolioManager:
                                        "sector": best["sector"], "region": best["region"]}
                 # The book changed (or the entry was refused): re-rank the rest.
                 cands = [c for c in cands if c["symbol"] != sym]
-                ranked = self._rank(cands, Counter())
+                ranked = self._through_desk(self._rank(cands, Counter()), Counter())
 
-        self.picks = [self._pick_view(r) for r in ranked[:MAX_PICKS_SHOWN]]
+        self.picks = [self._pick_view(r) for r in all_ranked[:MAX_PICKS_SHOWN]]
         self.blocked_by = dict(blocked.most_common(6))
-        self.status = self._describe(active, profile, entered, ranked, blocked, executor)
+        pending = [r for r in all_ranked if r.get("desk") not in (None, "cleared")] if reviewing else []
+        self.status = self._describe(active, profile, entered, ranked, blocked, executor, pending)
         self.cycles += 1
         self.last_cycle_at = time.time()
         self.last_cycle_ms = (time.perf_counter() - t0) * 1000
         self._log_transition()
+
+    @staticmethod
+    def _through_desk(ranked: List[Dict[str, Any]], blocked: Counter) -> List[Dict[str, Any]]:
+        """Hands each ranked signal to the trade desk; returns the ones it has approved."""
+        from desk.desk import desk
+        if not desk.enabled:
+            return ranked
+        cleared = []
+        for r in ranked:
+            gate = state.last_gate_detail.get(r["symbol"]) or {}
+            r["desk"] = desk.propose(r["symbol"], float(r["decision"].buy_prob), r["decision"].reason,
+                                     gate.get("selected_strategy") or gate.get("strategy") or "?", r["plan"])
+            if r["desk"] == "cleared":
+                cleared.append(r)
+            else:
+                blocked[f"desk: {r['desk']}"] += 1
+        return cleared
 
     def _shadow_rl(self):
         """
@@ -347,9 +383,9 @@ class PortfolioManager:
     def _pick_view(r: Dict[str, Any]) -> Dict[str, Any]:
         return {"symbol": r["symbol"], "score": r["score"], "conviction": r["conviction"],
                 "fit": r["fit"], "sector": r["sector"], "region": r["region"], "why": r["why"],
-                "plan": r["plan"], "trend": r["trend"].brief()}
+                "plan": r["plan"], "trend": r["trend"].brief(), "desk": r.get("desk")}
 
-    def _describe(self, active, profile, entered, ranked, blocked, executor) -> Dict[str, Any]:
+    def _describe(self, active, profile, entered, ranked, blocked, executor, pending=()) -> Dict[str, Any]:
         cap = state.hard_cap
         idle = state.remaining_budget
         slots = self._slots(executor)
@@ -370,6 +406,9 @@ class PortfolioManager:
             st, msg = "full", f"Budget fully committed (${idle:,.2f} left)."
         elif ranked:
             st, msg = "active", f"{len(ranked)} entries ranked; the best goes in next cycle."
+        elif pending:
+            st, msg = "reviewing", ("With the trade desk: " + ", ".join(f"{r['symbol']} ({r['desk']})" for r in pending[:4])
+                                    + f". Nothing is bought until it approves; ${idle:,.2f} of budget idle.")
         else:
             n = len(self.watch)
             st, msg = "watching", (

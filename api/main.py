@@ -29,6 +29,8 @@ from engine.analysis.service import analysis_service
 from core.capital_plan import capital_plan
 from core.market_filter import market_filter
 from engine.discovery import discovery, WEIGHTS as DISCOVERY_WEIGHTS
+from scout.service import scout
+from scout.watcher import watcher
 from engine.diversification import diversification
 from engine.portfolio_manager import portfolio_manager
 from engine.fleet import fleet
@@ -123,6 +125,9 @@ async def broadcast_telemetry():
                     "capital_plan": capital_plan.plan.to_dict(),
                     "diversification": _diversification_brief(),
                     "manager": portfolio_manager.snapshot(),
+                    "desk": _desk_snapshot(),
+                    "thoughts": _thoughts_snapshot(),
+                    "news_log": _news_log_snapshot(),
                     "fleet": fleet.snapshot(),
                     "latency": latency_snapshot,
                     "server_time": time.time(),
@@ -197,6 +202,37 @@ def _diversification_brief() -> Dict[str, Any]:
 
 
 _sm_cache: Dict[str, Any] = {"at": 0.0, "data": None}
+
+
+_desk_cache: Dict[str, Any] = {"version": -1, "at": 0.0, "data": None}
+_news_cache: Dict[str, Any] = {"version": -1, "at": 0.0, "data": None}
+
+
+def _desk_snapshot() -> Dict[str, Any]:
+    """The trade desk, rebuilt only when it changed (or every 2s for elapsed timers)."""
+    from desk.desk import desk
+    now = time.time()
+    if _desk_cache["data"] is None or desk.version != _desk_cache["version"] or now - _desk_cache["at"] > 2.0:
+        _desk_cache.update(version=desk.version, at=now, data=desk.snapshot())
+    return _desk_cache["data"]
+
+
+_thoughts_cache: Dict[str, Any] = {"version": -1, "data": None}
+
+
+def _thoughts_snapshot() -> Dict[str, Any]:
+    from engine.thoughts import thoughts
+    if _thoughts_cache["data"] is None or thoughts.version != _thoughts_cache["version"]:
+        _thoughts_cache.update(version=thoughts.version, data=thoughts.snapshot())
+    return _thoughts_cache["data"]
+
+
+def _news_log_snapshot() -> Dict[str, Any]:
+    from feeds.news_log import news_log
+    now = time.time()
+    if _news_cache["data"] is None or news_log.version != _news_cache["version"] or now - _news_cache["at"] > 5.0:
+        _news_cache.update(version=news_log.version, at=now, data=news_log.snapshot(30))
+    return _news_cache["data"]
 
 
 def _smart_money_snapshot() -> Dict[str, Any]:
@@ -869,6 +905,7 @@ async def remove_from_watchlist(symbol: str):
         state.watchlist.remove(sym)
         state.log_event("WATCHLIST", f"Removed {sym} from active watchlist")
         discovery.on_unwatched(sym)
+        scout.on_unwatched(sym)
     return {"message": f"{sym} removed from watchlist", "watchlist": list(state.watchlist)}
 
 @app.get("/api/markets")
@@ -935,6 +972,56 @@ async def trigger_trend_sync():
 # ---------------------------------------------------------------------------
 # Discovery & diversification
 # ---------------------------------------------------------------------------
+
+@app.get("/api/desk")
+async def get_desk():
+    """The trade desk: its agents, cases under review, approvals and recent verdicts."""
+    from desk.desk import desk
+    return desk.snapshot()
+
+
+@app.get("/api/desk/case/{case_id}")
+async def get_desk_case(case_id: str):
+    """One case in full: the case file the models read and their complete reasoning."""
+    from desk.desk import desk
+    c = desk.case(case_id)
+    if c is None:
+        raise HTTPException(status_code=404, detail="no such case in memory")
+    return c
+
+
+@app.post("/api/desk/review/{symbol}")
+async def request_desk_review(symbol: str, observe_seconds: float = 0.0):
+    """Asks the desk to review a watched stock now (it still has to approve before any buy)."""
+    from desk.desk import desk
+    try:
+        return desk.review_now(symbol, max(0.0, min(observe_seconds, 600.0)))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/news/log")
+async def get_news_log(limit: int = 100):
+    """Ingested headlines with their entities, events and scores."""
+    from feeds.news_log import news_log
+    return news_log.snapshot(max(1, min(limit, 300)))
+
+
+@app.get("/api/scout")
+async def get_scout(limit: int = 30):
+    """Today's ranking, the picks on the watchlist, and the watcher's live read on each."""
+    return {**scout.snapshot(max(1, min(limit, 200))), "watcher": watcher.snapshot(),
+            "agent": scout.card()}
+
+
+@app.post("/api/scout/refresh")
+async def refresh_scout():
+    """Re-ranks now instead of waiting for the hourly run."""
+    if not settings.SCOUT_ENABLED:
+        raise HTTPException(status_code=400, detail="SCOUT_ENABLED is off")
+    await scout.step()
+    return {"status": "success", "picks": sorted(scout.picks), "ranked": len(scout.ranking)}
+
 
 @app.get("/api/discovery")
 async def get_discovery(status: Optional[str] = None, sector: Optional[str] = None,

@@ -142,7 +142,9 @@ class Settings(BaseSettings):
     # Auto-selection: each cycle the best-scoring stocks are put on the watchlist
     # (and auto-picked ones that fall well out of the ranking are taken off, unless
     # held). Entries still pass the strategy, risk guard and diversification gates.
-    DISCOVERY_AUTO_PROMOTE: bool = True
+    # Off while the scout (scout/) picks the watchlist: two rankers adding and
+    # dropping symbols would fight. The pool still scores for manual picks.
+    DISCOVERY_AUTO_PROMOTE: bool = False
     DISCOVERY_AUTO_TOP_N: int = 10
     DISCOVERY_AUTO_MIN_SCORE: float = 0.55
     # Extra auto-pick slots for stocks the smart-money sources are clearly bullish
@@ -207,6 +209,20 @@ class Settings(BaseSettings):
     # within it, whatever the normal backoff would have been.
     FORCED_EXIT_MAX_WAIT_SECONDS: float = 50.0
 
+    # --- Profit-taking (engine/profit_manager.py), in R = entry - initial stop ---
+    # At +SCALE_OUT_AT_R sell SCALE_OUT_FRACTION and move the stop to breakeven;
+    # then trail the stop TRAIL_DISTANCE_R behind the high. The target still
+    # closes the rest. Stops are also held at the broker (an OCO stop + target
+    # for the shares held), re-placed at most every BROKER_STOP_UPDATE_SECONDS.
+    PROFIT_TAKING_ENABLED: bool = True
+    SCALE_OUT_AT_R: float = 1.0
+    SCALE_OUT_FRACTION: float = 0.5
+    BREAKEVEN_BUFFER_PCT: float = 0.05
+    TRAIL_DISTANCE_R: float = 1.0
+    STOP_MIN_STEP_R: float = 0.1
+    BROKER_STOP_UPDATE_SECONDS: float = 30.0
+    BROKER_PROTECTION_CHECK_SECONDS: float = 60.0
+
     # --- Day trading: nothing is held through the close ---
     # Stocks are flattened this long before their market closes (the broker clock's
     # own close time, so half-days are respected) and get no new entries inside
@@ -269,8 +285,109 @@ class Settings(BaseSettings):
     SMART_MONEY_MIN_DOLLAR_VOLUME: float = 10_000_000.0   # average daily $ traded
     SMART_MONEY_FIRST_ENTRY_MINUTES: float = 30.0  # no entries in the first half hour
 
+    # --- Scout: our own stock discovery (scout/) ---
+    # Every SCOUT_INTERVAL_SECONDS it ranks the stocks worth watching today from
+    # past-window performance, today's move, news and public discussion (Reddit,
+    # StockTwits), and puts the top SCOUT_TOP_N on the watchlist.
+    SCOUT_ENABLED: bool = True
+    SCOUT_INTERVAL_SECONDS: float = 3600.0
+    SCOUT_TOP_N: int = 10
+    # A pick stays on the watchlist until it falls out of the top
+    # SCOUT_KEEP_RANK, so ranks shuffling by a place cause no churn.
+    SCOUT_KEEP_RANK: int = 20
+    SCOUT_MIN_SCORE: float = 0.55
+    # Eligibility: a real, liquid US common stock with enough history to judge.
+    SCOUT_MIN_PRICE: float = 5.0
+    SCOUT_MIN_DOLLAR_VOLUME: float = 20_000_000.0
+    SCOUT_MAX_POOL: int = 500
+    # The world's exchanges (scout/exchanges.py): each hour, the SCOUT_EXCHANGE_TOP
+    # most-traded stocks of every market listed here ("tradingview market:label"),
+    # mapped by company name to a US line Alpaca can trade (an ADR or a US
+    # listing). Hot stocks with no such line are shown but cannot be traded.
+    SCOUT_EXCHANGES: str = ("uk:London,germany:Xetra,france:Paris,netherlands:Amsterdam,switzerland:Zurich,"
+                            "hongkong:Hong Kong,india:India NSE,japan:Tokyo,korea:Korea,taiwan:Taiwan")
+    SCOUT_EXCHANGE_TOP: int = 40
+    # Picks reserved per exchange on top of SCOUT_TOP_N (its best tradable stock),
+    # at most SCOUT_INTL_MAX_PICKS in all: foreign stocks get little US news and
+    # Reddit attention and would otherwise rarely make the overall top.
+    SCOUT_EXCHANGE_SLOTS: int = 1
+    SCOUT_INTL_MAX_PICKS: int = 6
+    SCOUT_EXCHANGE_MIN_SCORE: float = 0.45
+    SCOUT_NEWS_LOOKBACK_HOURS: float = 24.0
+    SCOUT_NEWS_MAX_ITEMS: int = 1000
+    # Headline tone is scored (Jev/Laya) for this many of the best candidates,
+    # at most SCOUT_TONE_HEADLINES of each one's newest headlines.
+    SCOUT_TONE_TOP_N: int = 30
+    SCOUT_TONE_HEADLINES: int = 3
+    SCOUT_REDDIT_PAGES: int = 2
+
+    # --- Watcher: keeps eyes on the scout's picks, decides when to trade ---
+    # Confidence (0..1) from the pick's scout score, the intraday trend, VWAP,
+    # the move since the open, fresh news and the market. An entry needs it at
+    # or above SCOUT_ENTRY_CONFIDENCE without a break for SCOUT_CONFIRM_SECONDS.
+    SCOUT_TRADING: bool = True
+    SCOUT_WATCH_INTERVAL_SECONDS: float = 5.0
+    SCOUT_ENTRY_CONFIDENCE: float = 0.65
+    SCOUT_CONFIRM_SECONDS: float = 90.0
+    SCOUT_EXIT_CONFIDENCE: float = 0.40
+    SCOUT_MIN_HOLD_MINUTES: float = 15.0
+    SCOUT_FIRST_ENTRY_MINUTES: float = 15.0      # no entries in the opening auction noise
+    SCOUT_MAX_ENTRIES_PER_DAY: int = 1           # per symbol
+
+    # --- Trade desk: every entry is observed, then argued by LLM agents (desk/) ---
+    # Observer   watches the stock for DESK_OBSERVE_SECONDS after the signal; the
+    #            signal must stay present for DESK_MIN_PERSISTENCE of the checks
+    # Analyst    DESK_ANALYST_MODEL with reasoning: thesis and P(target before stop)
+    # Critic     DESK_CRITIC_MODEL: argues against the trade, may veto
+    # Decision   both agree and their mean probability clears the breakeven of the
+    #            trade's own stop/target by a margin set by the risk dial (and DESK_MIN_PROB)
+    # The executor refuses any buy without a fresh approval (DESK_REQUIRED), so an
+    # unreachable Ollama blocks entries rather than letting them through unreviewed.
+    DESK_ENABLED: bool = True
+    DESK_REQUIRED: bool = True
+    DESK_REVIEW_WHEN_PAUSED: bool = False
+    OLLAMA_URL: str = Field(default=os.getenv("OLLAMA_URL", "http://localhost:11434"))
+    # Two different models, so the critic is a second opinion and not the same
+    # model agreeing with itself. On the 8 GB GPU they cannot both sit in VRAM:
+    # swapping them costs 1.5-3 minutes a review, so the analyst stays wholly on
+    # the GPU and the critic takes the VRAM left over, the rest of its layers in
+    # RAM (DESK_CRITIC_NUM_GPU layers on the GPU; -1 lets Ollama decide).
+    DESK_ANALYST_MODEL: str = "qwen3.5:9b"
+    DESK_ANALYST_THINK: bool = True
+    DESK_ANALYST_NUM_GPU: int = -1
+    DESK_CRITIC_MODEL: str = "qwen3:4b"
+    DESK_CRITIC_THINK: bool = False
+    DESK_CRITIC_NUM_GPU: int = 12
+    DESK_LLM_TIMEOUT_SECONDS: float = 150.0
+    DESK_LLM_MAX_TOKENS: int = 3500
+    # Reasoning budget (~35 tokens/s on an RTX 3070): past it the model is handed
+    # its notes and asked to answer, so a review cannot run for minutes.
+    DESK_THINK_BUDGET_TOKENS: int = 1000
+    DESK_OBSERVE_SECONDS: float = 90.0
+    DESK_MIN_PERSISTENCE: float = 0.7
+    DESK_SIGNAL_GAP_SECONDS: float = 20.0      # signal missing this long while observed: faded
+    # The bar is the trade's own breakeven (from its stop and target distances)
+    # plus the risk dial's margin (below), never below DESK_MIN_PROB.
+    DESK_MIN_PROB: float = 0.40
+    # Margin over breakeven, by the risk dial: DESK_EDGE_MARGIN_CAUTIOUS at dial 1
+    # down to DESK_EDGE_MARGIN_AGGRESSIVE at dial 10 (linear). A cautious user
+    # needs a clearer edge before the desk approves.
+    DESK_EDGE_MARGIN_CAUTIOUS: float = 0.08
+    DESK_EDGE_MARGIN_AGGRESSIVE: float = 0.02
+    # Context window per call: the case file, the reasoning and the answer must
+    # fit, or Ollama silently drops the start of the prompt (its default is 4096).
+    DESK_NUM_CTX: int = 8192
+    DESK_CLEARANCE_SECONDS: float = 180.0      # an approval is good this long
+    DESK_MAX_PRICE_DRIFT_PCT: float = 0.5      # ...and while price stays this close
+    DESK_REJECT_COOLDOWN_SECONDS: float = 900.0
+    DESK_MAX_ACTIVE_CASES: int = 4
+
     # --- Curator: moves discovery's best picks onto the watchlist ---
     CURATOR_INTERVAL_SECONDS: float = 30.0
+
+    # Times shown to the operator (dashboard, logs, scheduler labels). Market
+    # logic never uses it: US sessions are always computed in New York time.
+    DISPLAY_TIMEZONE: str = Field(default=os.getenv("DISPLAY_TIMEZONE", "Europe/Paris"))
 
     # Server Settings
     HOST: str = "0.0.0.0"

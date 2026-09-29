@@ -1,5 +1,6 @@
 import numpy as np
 import time
+from feeds.spreads import spreads
 from collections import deque
 from itertools import islice
 from typing import Optional, Dict, Any
@@ -189,7 +190,9 @@ class QuantMatrix:
                 ema_fast=tick.price if tick else 100.0,
                 ema_slow=tick.price if tick else 100.0,
                 atr=max((tick.price if tick else 100.0) * 0.005, 1e-9),
-                spread=0.01,
+                # Not a placeholder 1%: that read as a real (too wide) spread and
+                # blocked every stock for its first minutes on the watchlist.
+                spread=spreads.estimate(symbol)[0] or 0.0,
                 volume_ratio=1.0
             )
             state.quant_metrics[symbol] = metrics
@@ -207,10 +210,11 @@ class QuantMatrix:
             if bar_atr:
                 atr = max(bar_atr, tick.price * 0.0005)
 
-        # t4: Bid-Ask Spread check
-        spread = 0.0
-        if tick.ask > 0 and tick.bid > 0:
-            spread = (tick.ask - tick.bid) / tick.price
+        # t4: Bid-Ask Spread: the real (consolidated) spread when known, else a
+        # short-window median of IEX quotes -- never one IEX snapshot, which for
+        # thinly-held names is many times the real spread (feeds/spreads.py).
+        # Unknown reads as 0: the scout only watches liquid stocks.
+        spread = spreads.estimate(symbol)[0] or 0.0
 
         # t5: Volume ratio over the last 20 volume samples (read from the deque's
         # tail only; converting the whole buffer made this O(n) too)
