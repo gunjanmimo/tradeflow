@@ -2,7 +2,7 @@ import asyncio
 import logging
 import random
 import time
-from typing import Optional
+from typing import Dict, Optional
 from core.config import settings
 from core.state import state
 from core.latency import latency
@@ -25,6 +25,7 @@ class MarketStreamRunner:
         self._stock_stream = None
         self._stock_bar_handler = None
         self._stock_trade_handler = None
+        self._stock_quote_handler = None
         self._stock_task = None
 
     async def start(self):
@@ -33,6 +34,7 @@ class MarketStreamRunner:
         if not settings.ALPACA_API_KEY.startswith("PK_PLACEHOLDER") and settings.ALPACA_API_KEY:
             self._live = True
             self._task = asyncio.create_task(self._run_alpaca_websocket())
+            self._sync_task = asyncio.create_task(self._sync_loop())
         else:
             logger.info("Starting high-frequency simulated market stream (realistic ticks 24/7)...")
             self._task = asyncio.create_task(self._run_simulated_stream())
@@ -41,6 +43,37 @@ class MarketStreamRunner:
         self._running = False
         if self._task:
             self._task.cancel()
+        if getattr(self, "_sync_task", None):
+            self._sync_task.cancel()
+
+    async def sync_subscriptions(self) -> list:
+        """
+        Subscribes every watched, held or context symbol the live stream is not
+        streaming yet; returns the ones added. Symbols put on the watchlist before
+        the stream existed (the scout's first ranking runs at start-up) were
+        silently never subscribed and so never got a price.
+        """
+        if not (self._running and self._live) or self._stock_stream is None:
+            return []
+        import re
+        bars = self._stock_stream._handlers.get("bars") or {}
+        want = set(state.watchlist) | set(state.active_positions) | set(settings.CONTEXT_SYMBOLS)
+        missing = sorted(s for s in want if s not in bars and re.match(r"^[A-Z]{1,5}(\.[A-Z])?$", s))
+        for sym in missing:
+            await self.ensure_stock_subscription(sym)
+        if missing:
+            logger.info(f"Subscribed live bars for {len(missing)} symbol(s) that had none: {', '.join(missing)}")
+        return missing
+
+    async def _sync_loop(self):
+        while self._running:
+            try:
+                await asyncio.sleep(15.0)
+                await self.sync_subscriptions()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"Subscription sync failed: {e}")
 
     async def ensure_stock_subscription(self, symbol: str):
         """
@@ -49,8 +82,7 @@ class MarketStreamRunner:
         without this a promoted symbol would never receive a price until restart.
         The simulated stream reads the watchlist every loop and needs nothing.
         """
-        from core.state import is_crypto_symbol
-        if not (self._running and self._live) or is_crypto_symbol(symbol):
+        if not (self._running and self._live):
             return
         stream = self._stock_stream
         if stream is None:
@@ -58,6 +90,8 @@ class MarketStreamRunner:
                 self._stock_task = asyncio.create_task(self._run_stock_live_feed())
             return
         await self._subscribe(stream, "bars", symbol, self._stock_bar_handler)
+        if self._stock_quote_handler is not None:
+            await self._subscribe(stream, "quotes", symbol, self._stock_quote_handler)
 
     async def ensure_position_stream(self, symbol: str):
         """
@@ -65,8 +99,7 @@ class MarketStreamRunner:
         position's stop and target checked at most once a minute, after the bar
         closed; each print now reaches its sentinel within milliseconds.
         """
-        from core.state import is_crypto_symbol
-        if not (self._running and self._live) or is_crypto_symbol(symbol):
+        if not (self._running and self._live):
             return
         stream = self._stock_stream
         if stream is None or self._stock_trade_handler is None:
@@ -86,7 +119,7 @@ class MarketStreamRunner:
             except Exception as e:
                 logger.warning(f"Live {channel} subscribe for {symbol} failed: {e}")
 
-    async def on_position_trade(self, symbol: str, price: float):
+    async def on_position_trade(self, symbol: str, price: float, is_trade: bool = True):
         """
         Fast path for a trade print on a held position: move its live price and
         hand the tick to its sentinel, which re-evaluates BUY/HOLD/SELL/CLOSE and
@@ -97,19 +130,47 @@ class MarketStreamRunner:
             return
         t0 = time.perf_counter_ns()
         state.update_price(symbol, price, record_history=False)
+        # A real trade print belongs to the forming minute's provisional bar
+        # (replaced by the streamed bar when that minute closes). A broker mark
+        # is not a trade and never makes a bar.
+        if is_trade:
+            from core.minute_bars import minute_bars
+            minute_bars.on_tick(symbol, price)
         from engine.sentinel_agent import sentinel_registry
         await sentinel_registry.dispatch_tick(symbol, price)
         latency.record_ns("position_trade", t0)
 
-    async def on_tick_received(self, symbol: str, price: float, bid: float, ask: float, volume: float):
+    async def on_bar_received(self, symbol: str, minute: int, o: float, h: float, l: float,
+                              c: float, volume: float):
         """
-        THE SUB-SECOND CRITICAL PATH:
-        Total processing time: < 0.15 milliseconds!
+        A completed one-minute bar: the only thing that adds an indicator sample.
+        Stored under its own start minute with its real OHLCV (core/minute_bars),
+        so the live series is the same series the backtester and the RL trainer
+        replay. Quotes and trade prints only move the live price between bars.
+        """
+        from core.minute_bars import minute_bars
+        minute_bars.on_bar(symbol, minute, o, h, l, c, volume)
+        await self.on_tick_received(symbol, c, 0.0, 0.0, volume, bar=True)
+
+    def on_quote(self, symbol: str, bid: float, ask: float):
+        """Live top of book: moves bid/ask (and the spread estimate), never history."""
+        state.update_quote(symbol, bid, ask)
+
+    async def on_tick_received(self, symbol: str, price: float, bid: float, ask: float, volume: float,
+                               bar: bool = False):
+        """
+        Evaluates a new price. Only a completed bar (bar=True) records an
+        indicator sample; anything else just moves the live price.
         """
         t0 = time.perf_counter_ns()
 
         # 1. Update In-Memory State
-        state.update_price(symbol, price, bid, ask, volume)
+        state.update_price(symbol, price, bid, ask, volume, record_history=bar)
+        if not bar:
+            if symbol in state.active_positions:
+                from engine.sentinel_agent import sentinel_registry
+                asyncio.create_task(sentinel_registry.dispatch_tick(symbol, price))
+            return
 
         # 2. Run Quant Matrix (t1...tN indicators)
         t_q = time.perf_counter_ns()
@@ -120,7 +181,6 @@ class MarketStreamRunner:
         sentiment = state.get_sentiment(symbol)
 
         # 4. If holding, dispatch tick to dedicated Sentinel Bot assigned to this trade
-        from engine.executor import executor
         if symbol in state.active_positions:
             from engine.sentinel_agent import sentinel_registry
             asyncio.create_task(sentinel_registry.dispatch_tick(symbol, price))
@@ -159,122 +219,51 @@ class MarketStreamRunner:
 
     async def _run_simulated_stream(self):
         """
-        Generates realistic high-frequency ticks for the active watchlist.
-        Ensures continuous trading testing works anywhere anytime.
+        Generates simulated ticks for the watchlist when no Alpaca keys are set.
         """
-        base_prices = {
-            "NVDA": 128.50,
-            "AAPL": 224.30,
-            "TSLA": 252.10,
-            "MSFT": 428.80,
-            "PLTR": 42.10,
-            "BTC/USD": 84950.00,
-            "ETH/USD": 2715.00,
-            "SOL/USD": 124.10,
-        }
+        base_prices: Dict[str, float] = {}      # every simulated symbol starts at 150
+        # One simulated "minute" bar per symbol every few seconds, so the demo
+        # moves at a watchable pace. Bars carry consecutive synthetic minutes,
+        # started far enough in the past that they never run ahead of the clock.
+        minute = int(time.time() // 60) - 200_000
 
-        # Initialize base price history so indicators have starting candles
-        for sym, p in base_prices.items():
-            for _ in range(30):
-                drift = random.uniform(-0.002, 0.002)
-                p = round(p * (1.0 + drift), 2)
-                state.update_price(sym, p, p - 0.02, p + 0.02, random.randint(100, 5000))
-            base_prices[sym] = p
+        def bar_for(sym: str) -> tuple:
+            p = base_prices.get(sym, 150.0)
+            path = [p]
+            for _ in range(4):
+                path.append(max(path[-1] * (1.0 + random.gauss(0.0, 0.0006)), 0.1))
+            base_prices[sym] = path[-1]
+            return (round(path[0], 2), round(max(path), 2), round(min(path), 2),
+                    round(path[-1], 2), float(random.randint(500, 20000)))
+
+        # Warm-up history so indicators have bars to read
+        for _ in range(60):
+            for sym in list(base_prices):
+                o, h, l, c, v = bar_for(sym)
+                await self.on_bar_received(sym, minute, o, h, l, c, v)
+            minute += 1
 
         while self._running:
             try:
-                symbols = list(state.watchlist)
-                for sym in symbols:
-                    current = base_prices.get(sym, 150.0)
-                    # Gaussian random walk with micro-drift
-                    change_pct = random.gauss(0.0001, 0.002)
-                    new_price = round(max(current * (1.0 + change_pct), 0.1), 2)
-                    base_prices[sym] = new_price
-                    
-                    spread = round(new_price * 0.0005, 2)
-                    bid = round(new_price - (spread / 2), 2)
-                    ask = round(new_price + (spread / 2), 2)
-                    vol = random.randint(50, 2000)
-
-                    await self.on_tick_received(sym, new_price, bid, ask, vol)
-
-                # Loop interval: 250ms per batch of watchlist ticks
-                await asyncio.sleep(0.25)
+                for sym in sorted(set(state.watchlist) | set(settings.CONTEXT_SYMBOLS)):
+                    o, h, l, c, v = bar_for(sym)
+                    half = round(c * 0.0002, 2)
+                    self.on_quote(sym, c - half, c + half)
+                    await self.on_bar_received(sym, minute, o, h, l, c, v)
+                minute += 1
+                await asyncio.sleep(2.0)
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Error in simulated market stream: {e}")
                 await asyncio.sleep(1.0)
 
-    async def _run_crypto_live_feed(self):
-        """24/7 Real-Time Crypto Data Feed from Alpaca + Binance Public Tickers"""
-        import urllib.request
-        import json
-        from core.state import is_crypto_symbol
-        from alpaca.data.historical.crypto import CryptoHistoricalDataClient
-        from alpaca.data.requests import CryptoLatestQuoteRequest
-
-        client = None
-        try:
-            client = CryptoHistoricalDataClient(settings.ALPACA_API_KEY, settings.ALPACA_SECRET_KEY)
-            logger.info("24/7 Alpaca Crypto Live Feed initialized.")
-        except Exception as e:
-            logger.warning(f"Alpaca crypto client setup warning: {e}")
-
-        def fetch_binance_prices_sync(symbols_list):
-            try:
-                # Fast targeted query for active watchlist
-                binance_symbols = [s.replace("/", "").replace("USD", "USDT") for s in symbols_list]
-                query = json.dumps(binance_symbols).replace(" ", "")
-                url = f"https://api.binance.com/api/v3/ticker/price?symbols={urllib.parse.quote(query)}"
-                req = urllib.request.Request(url, headers={"User-Agent": "TradeFlow/1.0"})
-                with urllib.request.urlopen(req, timeout=2) as resp:
-                    data = json.loads(resp.read().decode())
-                    return {item["symbol"]: float(item["price"]) for item in data}
-            except Exception:
-                try:
-                    # Fallback to full endpoint
-                    url = "https://api.binance.com/api/v3/ticker/price"
-                    req = urllib.request.Request(url, headers={"User-Agent": "TradeFlow/1.0"})
-                    with urllib.request.urlopen(req, timeout=3) as resp:
-                        data = json.loads(resp.read().decode())
-                        return {item["symbol"]: float(item["price"]) for item in data}
-                except Exception as e:
-                    logger.debug(f"Binance price poll note: {e}")
-                    return {}
-
-        while self._running:
-            cryptos = [s for s in state.watchlist if is_crypto_symbol(s)]
-            if cryptos:
-                loop = asyncio.get_running_loop()
-                t_poll = time.perf_counter_ns()
-                binance_map = await loop.run_in_executor(None, fetch_binance_prices_sync, cryptos)
-                # A polled price is at least one round-trip old when it lands.
-                latency.record_ns("feed_crypto_poll", t_poll)
-                
-                for sym in cryptos:
-                    binance_pair = sym.replace("/", "").replace("USD", "USDT")
-                    price = binance_map.get(binance_pair)
-                    if price and price > 0:
-                        precision = 8 if price < 0.0001 else (4 if price < 1.0 else 2)
-                        spread = price * 0.0004
-                        await self.on_tick_received(
-                            symbol=sym,
-                            price=round(price, precision),
-                            bid=round(price - (spread / 2), precision),
-                            ask=round(price + (spread / 2), precision),
-                            volume=1000.0
-                        )
-
-            await asyncio.sleep(0.5)
-
     async def _run_stock_live_feed(self):
         """Stock WebSocket Data Stream (runs during market hours, maintains baseline off-hours)"""
-        from core.state import is_crypto_symbol
         from alpaca.data.live import StockDataStream
 
-        stocks = [s for s in state.watchlist if not is_crypto_symbol(s)]
-        if not stocks and not any(not is_crypto_symbol(s) for s in state.active_positions):
+        stocks = sorted(set(state.watchlist) | set(settings.CONTEXT_SYMBOLS))
+        if not stocks and not state.active_positions:
             return
 
         try:
@@ -283,18 +272,16 @@ class MarketStreamRunner:
             async def handle_stock_bar(bar):
                 # Bars are stamped with their START; the price is its close, a
                 # minute later. Age = now - bar end, i.e. pure delivery delay.
-                try:
-                    bar_end = bar.timestamp.timestamp() + 60.0
-                    latency.record_us("feed_stock_bar_age", max(time.time() - bar_end, 0.0) * 1e6)
-                except Exception:
-                    pass
-                await self.on_tick_received(
-                    symbol=bar.symbol,
-                    price=float(bar.close),
-                    bid=float(bar.close * 0.9998),
-                    ask=float(bar.close * 1.0002),
-                    volume=float(bar.volume)
-                )
+                start = bar.timestamp.timestamp()
+                latency.record_us("feed_stock_bar_age", max(time.time() - start - 60.0, 0.0) * 1e6)
+                await self.on_bar_received(
+                    bar.symbol, int(start // 60), float(bar.open), float(bar.high),
+                    float(bar.low), float(bar.close), float(bar.volume or 0.0))
+
+            async def handle_stock_quote(q):
+                bid, ask = float(q.bid_price or 0.0), float(q.ask_price or 0.0)
+                if bid > 0 and ask >= bid:
+                    self.on_quote(q.symbol, bid, ask)
 
             async def handle_stock_trade(trade):
                 try:
@@ -304,14 +291,16 @@ class MarketStreamRunner:
                     pass
                 await self.on_position_trade(trade.symbol, float(trade.price))
 
-            held = [s for s in state.active_positions if not is_crypto_symbol(s)]
+            held = list(state.active_positions)
             for s in sorted(set(stocks) | set(held)):
                 stock_stream.subscribe_bars(handle_stock_bar, s)
+                stock_stream.subscribe_quotes(handle_stock_quote, s)
             for s in held:
                 stock_stream.subscribe_trades(handle_stock_trade, s)
             self._stock_stream = stock_stream
             self._stock_bar_handler = handle_stock_bar
             self._stock_trade_handler = handle_stock_trade
+            self._stock_quote_handler = handle_stock_quote
 
             await stock_stream._run_forever()
         except Exception as e:
@@ -324,7 +313,6 @@ class MarketStreamRunner:
         would sit without a price (and without a spread) all pre-market. Polls the
         latest real bid/ask instead; the quote spread feeds the spread gate.
         """
-        from core.state import is_crypto_symbol
         from core.market_hours import us_session, PRE
         from alpaca.data.historical import StockHistoricalDataClient
         from alpaca.data.requests import StockLatestQuoteRequest
@@ -333,7 +321,7 @@ class MarketStreamRunner:
         loop = asyncio.get_running_loop()
         while self._running:
             try:
-                stocks = sorted(s for s in state.watchlist if not is_crypto_symbol(s))
+                stocks = sorted(state.watchlist)
                 if settings.PREMARKET_TRADING_ENABLED and stocks and us_session() == PRE:
                     quotes = await loop.run_in_executor(
                         None, client.get_stock_latest_quote,
@@ -344,6 +332,9 @@ class MarketStreamRunner:
                         ts = q.timestamp.timestamp() if q.timestamp else None
                         if not usable_quote(bid, ask, ts, now):
                             continue
+                        # A live price, not an indicator sample: the poll's 15s
+                        # cadence must not leak into the one-minute bar series.
+                        self.on_quote(sym, bid, ask)
                         await self.on_tick_received(symbol=sym, price=(bid + ask) / 2,
                                                     bid=bid, ask=ask, volume=0.0)
             except asyncio.CancelledError:
@@ -353,9 +344,8 @@ class MarketStreamRunner:
             await asyncio.sleep(settings.PREMARKET_QUOTE_POLL_SECONDS)
 
     async def _run_alpaca_websocket(self):
-        """Runs 24/7 crypto and stock market streams concurrently without blocking"""
+        """Runs the stock bar stream and the pre-market quote poller concurrently."""
         await asyncio.gather(
-            self._run_crypto_live_feed(),
             self._run_stock_live_feed(),
             self._run_premarket_quote_poller(),
         )

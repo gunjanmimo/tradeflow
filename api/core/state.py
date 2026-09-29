@@ -1,3 +1,5 @@
+import json
+import os
 import time
 from collections import deque
 from typing import Dict, Any, List, Optional
@@ -6,7 +8,30 @@ import asyncio
 from core.risk_profile import (
     RiskProfile, get_profile, clamp_factor, DEFAULT_RISK_FACTOR,
 )
-from core.minute_bars import minute_bars
+
+_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+_RISK_PATH = os.path.join(_DATA_DIR, "risk_dial.json")
+
+
+def _load_risk_factor() -> int:
+    """The dial the user last set on the dashboard; DEFAULT_RISK_FACTOR if never set."""
+    try:
+        with open(_RISK_PATH) as f:
+            return clamp_factor(json.load(f).get("risk_factor", DEFAULT_RISK_FACTOR))
+    except (OSError, ValueError, AttributeError):
+        return DEFAULT_RISK_FACTOR
+
+
+def _save_risk_factor(factor: int):
+    try:
+        os.makedirs(_DATA_DIR, exist_ok=True)
+        tmp = _RISK_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"risk_factor": int(factor), "saved_at": time.time()}, f)
+        os.replace(tmp, _RISK_PATH)
+    except OSError:
+        pass
+
 
 @dataclass
 class ScoredHeadline:
@@ -77,13 +102,14 @@ class TradeDecision:
     # A protective exit (stale price, end of day) that must not wait out the
     # normal retry backoff: see settings.FORCED_EXIT_MAX_WAIT_SECONDS.
     forced: bool = False
-    # SELL: share of the position to sell (0.5 = trim half). CLOSE is always all.
-    fraction: float = 1.0
-    # SELL from the profit harvest: the gain is booked as ring-fenced day income.
-    harvest: bool = False
-    # BUY from loss recovery: a one-time add of rescue_qty to a losing position.
-    rescue: bool = False
-    rescue_qty: float = 0.0
+
+def ny_date(ts: Optional[float] = None) -> str:
+    """The New York calendar date: the US trading day, whatever the host's timezone."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    return datetime.fromtimestamp(time.time() if ts is None else ts,
+                                  tz=ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+
 
 def price_decimals(price: float) -> int:
     """
@@ -112,54 +138,25 @@ def round_price(value: float, ref_price: float) -> float:
     return round(float(value), price_decimals(ref_price))
 
 
-def qty_decimals(price: float) -> int:
-    """
-    Quantity precision for a fractional (crypto) order, chosen so that one
-    quantity step is a negligible fraction of the order's notional value.
-
-    Cheap assets are bought in large whole units; expensive ones in small
-    fractions. A flat precision breaks one end or the other.
-    """
-    p = abs(float(price))
-    if p >= 10000:
-        return 6
-    if p >= 100:
-        return 4
-    if p >= 1:
-        return 3
-    if p >= 0.01:
-        return 1
-    return 0
-
-
-def is_crypto_symbol(symbol: str) -> bool:
-    """Helper to detect if a ticker is a cryptocurrency pair"""
-    sym = symbol.upper()
-    return "/USD" in sym or sym in ("BTC", "ETH", "SOL", "AVAX", "DOGE", "LINK")
-
 class InMemoryState:
     """
-    Sub-microsecond In-Memory State store for continuous execution loop.
-    Supports both US Equities (NYSE/NASDAQ) and 24/7 Cryptocurrencies.
+    In-memory state store for the trading engine. US equities only.
     """
     def __init__(self):
         # Global Kill Switch (Deactivated by default on boot for safety)
         self.is_trading_active: bool = False
         
-        # Dual Watchlist: High-liquidity Equities + 24/7 Top Crypto
-        self.watchlist: set[str] = {
-            # US Equities
-            "NVDA", "AAPL", "MSFT", "PLTR",
-            # 24/7 High-Volume Cryptocurrencies
-            "BTC/USD", "ETH/USD", "SOL/USD", "BNB/USD", "XRP/USD",
-            "DOGE/USD", "ADA/USD", "AVAX/USD", "LINK/USD", "SUI/USD",
-            "NEAR/USD", "TAO/USD", "LTC/USD", "BCH/USD", "UNI/USD",
-            "TRX/USD", "ZEC/USD", "XLM/USD", "HBAR/USD", "WLD/USD",
-            "SHIB/USD", "HYPE/USD"
-        }
+        # Starts empty: every watched stock is discovered at runtime -- the scout's
+        # hourly picks (scout/), smart-money buys, or what the user adds by hand.
+        self.watchlist: set[str] = set()
         
         # Real-time price ticks: symbol -> PriceTick
         self.latest_prices: Dict[str, PriceTick] = {}
+        # Latest top of book from the quote stream: symbol -> (bid, ask, unix time),
+        # and a smoothed relative spread per symbol (fraction of mid). The spread
+        # estimate is what live trading actually pays; the cost model uses it.
+        self.latest_quotes: Dict[str, tuple] = {}
+        self.spread_estimate: Dict[str, float] = {}
         # symbol -> when its price last CHANGED. A tick that repeats the last price
         # (a re-marked quiet position, a heartbeat) does not count, so the age of
         # this stamp tells a quiet market apart from a dead feed.
@@ -223,11 +220,10 @@ class InMemoryState:
         self.allocated_capital: float = 10000.0
 
         # --- Strategy selection ---
-        # Which strategy runs per asset class, and per-symbol overrides that win
-        # over the class default. Changed live from the API; read on every tick.
+        # The default strategy, and per-symbol overrides that win over it.
+        # Changed live from the API; read on every tick.
         self.strategy_class_defaults: Dict[str, str] = {
-            "crypto": "momentum_breakout",
-            "equity": "stock_score",
+            "equity": "news_catalyst",
         }
         self.strategy_overrides: Dict[str, str] = {}
         # Last entry-gate evaluation per symbol, so the UI can explain a no-trade.
@@ -235,19 +231,18 @@ class InMemoryState:
 
         # Portfolio-wide risk dial (1-10, default 4). Every risk limit is derived
         # from this, so changing it takes effect on the very next evaluation --
-        # no restart, no recomputation step.
-        self._risk_factor: int = DEFAULT_RISK_FACTOR
+        # no restart, no recomputation step. The value the user sets on the
+        # dashboard is saved (data/risk_dial.json) and restored on start-up, so a
+        # restart never silently puts the dial back to the default.
+        self._risk_factor: int = _load_risk_factor()
 
         # --- Portfolio-level risk tracking (drives the circuit breakers) ---
         # Realised PnL booked today, reset at the start of each trading day.
         self.realized_pnl_today: float = 0.0
-        # Part of realized_pnl_today taken as ring-fenced day income by the
-        # profit harvest. Excluded from the daily-loss breaker.
+        # Income the (removed) profit harvest set aside earlier today, read back
+        # from the ledger so the daily-loss breaker still excludes it.
         self.harvested_today: float = 0.0
-        # Stocks Alpaca trades in fractions (from the asset catalog at start-up):
-        # a profit harvest sells half of a one-share winner as 0.5 share.
-        self.fractionable_symbols: set = set()
-        self.trading_day: str = time.strftime("%Y-%m-%d")
+        self.trading_day: str = ny_date()
         # High-water mark of equity, for drawdown measurement.
         self.peak_equity: float = 0.0
         # Set when a circuit breaker trips; blocks new entries but never blocks exits.
@@ -270,6 +265,7 @@ class InMemoryState:
     @risk_factor.setter
     def risk_factor(self, value):
         self._risk_factor = clamp_factor(value)
+        _save_risk_factor(self._risk_factor)
 
     @property
     def risk_profile(self) -> RiskProfile:
@@ -427,20 +423,50 @@ class InMemoryState:
             self.time_history[symbol] = deque(maxlen=maxlen)
         return self.price_history[symbol]
 
+    QUOTE_MAX_AGE_S = 10.0
+
+    def update_quote(self, symbol: str, bid: float, ask: float, ts: Optional[float] = None):
+        """Records a live quote. Moves bid/ask and the spread estimate, never history."""
+        if bid <= 0 or ask < bid:
+            return
+        now = time.time() if ts is None else ts
+        self.latest_quotes[symbol] = (float(bid), float(ask), now)
+        mid = (bid + ask) / 2.0
+        rel = (ask - bid) / mid if mid > 0 else 0.0
+        prev = self.spread_estimate.get(symbol)
+        # Slow EWMA: one wide quote in a burst should not swing the estimate.
+        self.spread_estimate[symbol] = rel if prev is None else 0.98 * prev + 0.02 * rel
+        # The spread monitor's short-window median (IEX fallback; see feeds/spreads.py).
+        from feeds.spreads import spreads
+        spreads.on_quote(symbol, bid, ask, now)
+        tick = self.latest_prices.get(symbol)
+        if tick is not None:
+            tick.bid, tick.ask = float(bid), float(ask)
+
+    def fresh_quote(self, symbol: str, now: Optional[float] = None) -> Optional[tuple]:
+        q = self.latest_quotes.get(symbol)
+        if q is None:
+            return None
+        now = time.time() if now is None else now
+        return q if now - q[2] <= self.QUOTE_MAX_AGE_S else None
+
     def update_price(self, symbol: str, price: float, bid: float = 0.0, ask: float = 0.0,
                      volume: float = 0.0, record_history: bool = True):
         """
-        record_history=False moves the live price without adding an indicator
-        sample: used for per-trade prints on held positions, whose indicators
-        stay on the bar cadence their lookbacks were tuned for.
+        record_history=True only for a completed one-minute bar: that is the one
+        cadence the indicators, the backtester and the RL policy are built on.
+        Quotes and trade prints pass record_history=False and only move the
+        live price. Without an explicit bid/ask, a fresh streamed quote is used.
         """
+        if not (bid and ask):
+            q = self.fresh_quote(symbol)
+            if q is not None:
+                bid, ask = q[0], q[1]
         tick = PriceTick(symbol=symbol, price=price, bid=bid or price, ask=ask or price, volume=volume)
         prev = self.latest_prices.get(symbol)
         if prev is None or prev.price != price or symbol not in self.price_moved_at:
             self.price_moved_at[symbol] = tick.timestamp
         self.latest_prices[symbol] = tick
-        # Every price, trade prints included, feeds the 1-minute bars trend reads.
-        minute_bars.on_tick(symbol, price, volume, tick.timestamp)
         if record_history:
             buf = self.get_or_create_history(symbol)
             buf.append(price)
@@ -610,8 +636,8 @@ class InMemoryState:
         return None if rec is None else round(time.time() - rec.updated_at, 1)
 
     def roll_trading_day_if_needed(self):
-        """Resets the daily loss counter when the calendar day turns over."""
-        today = time.strftime("%Y-%m-%d")
+        """Resets the daily loss counter when the New York trading day turns over."""
+        today = ny_date()
         if today != self.trading_day:
             self.log_event(
                 "RISK_DAY_ROLL",
@@ -638,20 +664,35 @@ class InMemoryState:
         from core.pnl_ledger import pnl_ledger
         pnl_ledger.on_close(symbol, pnl)
 
-    def book_harvested_income(self, symbol: str, pnl: float):
+    def revise_realized_pnl(self, symbol: str, old_pnl: float, new_pnl: float):
         """
-        Books a profit-harvest gain as day income. It counts in today's P&L but
-        never in the trading budget: not in classic's realised ledger, not in a
-        stair stage's capital, and not as a cushion against the daily loss limit.
+        Corrects a booked close to the broker's actual fill. The budget, the
+        stair ladder and the daily ledger all move by the difference, so the
+        hard cap and the daily-loss halt see what the account really lost.
         """
+        delta = round(float(new_pnl) - float(old_pnl), 2)
+        if abs(delta) < 0.005:
+            return
         self.roll_trading_day_if_needed()
-        value = round(float(pnl), 2)
-        self.realized_pnl_today = round(self.realized_pnl_today + value, 2)
-        self.harvested_today = round(self.harvested_today + value, 2)
+        self.realized_pnl_today = round(self.realized_pnl_today + delta, 2)
         from core.capital_plan import capital_plan
-        capital_plan.on_harvest(symbol, value)
+        capital_plan.on_realized(symbol, delta)
         from core.pnl_ledger import pnl_ledger
-        pnl_ledger.on_harvest(symbol, value)
+        pnl_ledger.revise(symbol, old_pnl, new_pnl)
+
+    @property
+    def broker_day_loss_pct(self) -> float:
+        """
+        Today's loss of the whole broker account (equity vs. the previous close),
+        as a percent of the bots' budget. It includes fees, slippage and open
+        losses that booked P&L cannot see: the independent check behind the
+        daily-loss halt.
+        """
+        last = float(self.account_info.get("last_equity") or 0.0)
+        eq = float(self.account_info.get("equity") or 0.0)
+        if last <= 0 or eq <= 0 or self.allocated_capital <= 0:
+            return 0.0
+        return max(0.0, round((last - eq) / self.allocated_capital * 100.0, 3))
 
     def update_peak_equity(self):
         # Measured on the bots' own equity. Against the whole broker account a

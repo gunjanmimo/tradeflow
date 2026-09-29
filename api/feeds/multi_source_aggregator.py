@@ -38,7 +38,8 @@ from core.config import settings
 from core.state import state
 from core.universe import universe
 
-# eToro lists crypto bare; these are read as the USD pair even when not watched.
+# eToro lists crypto bare ("BTC"). Crypto is not traded here, so these are
+# dropped rather than mistaken for stock tickers.
 _CRYPTO_BASES = frozenset({
     "BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "AVAX", "LINK", "LTC", "BCH",
     "DOT", "SHIB", "UNI", "XLM", "TRX", "BNB",
@@ -56,6 +57,8 @@ class SourceSignal:
     details: str
     is_real: bool = True         # provenance flag; only real data may size a trade
     observed_at: float = field(default_factory=time.time)
+    value_usd: float = 0.0       # Form 4: net dollar value bought (+) or sold (-)
+    breadth: float = 0.0         # eToro: share of the top investors holding it
 
 
 @dataclass
@@ -246,12 +249,12 @@ class MultiSourceTrendAggregator:
             conviction = min(0.95, 0.55 + min(net / 5_000_000.0, 1.0) * 0.40)
             return SourceSignal(
                 "SEC Form 4", symbol, round(conviction, 3), "BULLISH",
-                f"{owner} open-market PURCHASE of ${net:,.0f} (Form 4)",
+                f"{owner} open-market PURCHASE of ${net:,.0f} (Form 4)", value_usd=round(net, 2),
             )
         conviction = min(0.95, 0.55 + min(-net / 5_000_000.0, 1.0) * 0.40)
         return SourceSignal(
             "SEC Form 4", symbol, round(conviction, 3), "BEARISH",
-            f"{owner} net SALE of ${-net:,.0f} (Form 4)",
+            f"{owner} net SALE of ${-net:,.0f} (Form 4)", value_usd=round(net, 2),
         )
 
     # -----------------------------------------------------------------
@@ -353,7 +356,7 @@ class MultiSourceTrendAggregator:
                         "eToro", sym, round(conviction, 3),
                         "BULLISH" if breadth >= 0.20 else "NEUTRAL",
                         f"Held by {n}/{counted} top Popular Investors "
-                        f"(avg allocation {depth*100:.1f}%)",
+                        f"(avg allocation {depth*100:.1f}%)", breadth=round(breadth, 3),
                     ))
 
             self._mark_health("eToro", True,
@@ -404,17 +407,16 @@ class MultiSourceTrendAggregator:
         """
         Maps an eToro instrument symbol onto the spelling we trade.
 
-        Crypto is listed bare ("BTC"); we track pairs ("BTC/USD"). A foreign
-        listing ("AZN.L") maps to its US ADR when one exists. Anything else is
+        Crypto (listed bare, e.g. "BTC") is dropped: only US equities are
+        traded. A foreign listing ("AZN.L") maps to its US ADR when one exists. Anything else is
         kept as-is: it is not tradable here, but it is still a discovery signal
         (a country ETF is offered as the proxy).
         """
         s = etoro_sym.upper().strip()
         if not s:
             return None
-        pair = f"{s}/USD"
-        if pair in state.watchlist or s in _CRYPTO_BASES:
-            return pair
+        if s in _CRYPTO_BASES:
+            return None
         if "." in s and s != "BRK.B":
             return universe.tradable_symbol(s) or s
         return s
@@ -556,6 +558,14 @@ class MultiSourceTrendAggregator:
             # sentiment was the circular-reasoning bug at the heart of the old
             # design. Laya scores real news text only; consensus is a separate,
             # independently-weighted input.
+
+        # Smart-money verdicts keep their own dated record: an insider purchase is
+        # a multi-day signal, while consensus above expires after an hour.
+        try:
+            from engine.smart_money import smart_money
+            smart_money.ingest(collected)
+        except Exception as e:
+            logger.warning(f"Smart-money book update failed: {e}")
 
         available = [n for n, h in self.source_health.items() if h.get("available")]
         state.log_event(

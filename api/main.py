@@ -1,4 +1,5 @@
 import asyncio
+import re
 import time
 import logging
 from contextlib import asynccontextmanager
@@ -28,6 +29,8 @@ from engine.analysis.service import analysis_service
 from core.capital_plan import capital_plan
 from core.market_filter import market_filter
 from engine.discovery import discovery, WEIGHTS as DISCOVERY_WEIGHTS
+from scout.service import scout
+from scout.watcher import watcher
 from engine.diversification import diversification
 from engine.portfolio_manager import portfolio_manager
 from engine.fleet import fleet
@@ -98,6 +101,7 @@ async def broadcast_telemetry():
                         for k, v in trend_aggregator.aggregated_trends.items()
                     },
                     "source_health": trend_aggregator.health(),
+                    "smart_money": _smart_money_snapshot(),
                     "strategy_routing": {
                         sym: strategy_registry.resolve(
                             sym, state.strategy_class_defaults, state.strategy_overrides
@@ -121,6 +125,9 @@ async def broadcast_telemetry():
                     "capital_plan": capital_plan.plan.to_dict(),
                     "diversification": _diversification_brief(),
                     "manager": portfolio_manager.snapshot(),
+                    "desk": _desk_snapshot(),
+                    "thoughts": _thoughts_snapshot(),
+                    "news_log": _news_log_snapshot(),
                     "fleet": fleet.snapshot(),
                     "latency": latency_snapshot,
                     "server_time": time.time(),
@@ -194,6 +201,53 @@ def _diversification_brief() -> Dict[str, Any]:
     }
 
 
+_sm_cache: Dict[str, Any] = {"at": 0.0, "data": None}
+
+
+_desk_cache: Dict[str, Any] = {"version": -1, "at": 0.0, "data": None}
+_news_cache: Dict[str, Any] = {"version": -1, "at": 0.0, "data": None}
+
+
+def _desk_snapshot() -> Dict[str, Any]:
+    """The trade desk, rebuilt only when it changed (or every 2s for elapsed timers)."""
+    from desk.desk import desk
+    now = time.time()
+    if _desk_cache["data"] is None or desk.version != _desk_cache["version"] or now - _desk_cache["at"] > 2.0:
+        _desk_cache.update(version=desk.version, at=now, data=desk.snapshot())
+    return _desk_cache["data"]
+
+
+_thoughts_cache: Dict[str, Any] = {"version": -1, "data": None}
+
+
+def _thoughts_snapshot() -> Dict[str, Any]:
+    from engine.thoughts import thoughts
+    if _thoughts_cache["data"] is None or thoughts.version != _thoughts_cache["version"]:
+        _thoughts_cache.update(version=thoughts.version, data=thoughts.snapshot())
+    return _thoughts_cache["data"]
+
+
+def _news_log_snapshot() -> Dict[str, Any]:
+    from feeds.news_log import news_log
+    now = time.time()
+    if _news_cache["data"] is None or news_log.version != _news_cache["version"] or now - _news_cache["at"] > 5.0:
+        _news_cache.update(version=news_log.version, at=now, data=news_log.snapshot(30))
+    return _news_cache["data"]
+
+
+def _smart_money_snapshot() -> Dict[str, Any]:
+    """The smart-money book for the dashboard, rebuilt at most every 5 seconds (telemetry is 4 Hz)."""
+    from engine.smart_money import smart_money
+    now = time.time()
+    if _sm_cache["data"] is None or now - _sm_cache["at"] > 5.0:
+        snap = smart_money.snapshot()
+        for r in snap["rows"]:
+            r["on_watchlist"] = r["symbol"] in state.watchlist
+            r["held"] = r["symbol"] in state.active_positions
+        _sm_cache.update(at=now, data=snap)
+    return _sm_cache["data"]
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Initializing Tradeflow Continuous Trading Engine...")
@@ -248,8 +302,8 @@ async def lifespan(app: FastAPI):
     await discovery.start()
     loop_monitor_task = asyncio.create_task(monitor_event_loop())
 
-    # 12. Agent fleet: trend analyst (reads the time series first), curator,
-    # trader (the portfolio manager) and position manager.
+    # 12. Agent fleet: trend analyst (reads the time series first), curator and
+    # trader (the portfolio manager).
     await fleet.start()
 
     logger.info("Tradeflow sub-second trading engine is LIVE!")
@@ -310,7 +364,7 @@ class CapitalPlanRequest(BaseModel):
     harvest_pct: float = 0.5
 
 class StrategyClassRequest(BaseModel):
-    asset_class: str      # "crypto" | "equity"
+    asset_class: str = "equity"   # the only asset class
     strategy: str
 
 class SymbolRequest(BaseModel):
@@ -423,6 +477,7 @@ def _portfolio_risk_snapshot() -> Dict[str, Any]:
         "realized_pnl_today": state.realized_pnl_today,
         "harvested_income_today": state.harvested_today,
         "daily_loss_pct": state.daily_loss_pct,
+        "broker_day_loss_pct": state.broker_day_loss_pct,
         "daily_loss_limit_pct": profile.max_daily_loss_pct,
         "drawdown_pct": state.drawdown_pct,
         "drawdown_limit_pct": profile.max_drawdown_pct,
@@ -496,19 +551,14 @@ async def list_strategies():
 
 @app.post("/api/strategies/class")
 async def set_class_strategy(req: StrategyClassRequest):
-    """Assigns the default strategy for an entire asset class."""
+    """Assigns the default strategy for US equities (the only asset class)."""
     klass = req.asset_class.lower().strip()
-    if klass not in ("crypto", "equity"):
-        raise HTTPException(status_code=400, detail="asset_class must be 'crypto' or 'equity'")
+    if klass != "equity":
+        raise HTTPException(status_code=400, detail="asset_class must be 'equity' (US stocks only)")
     if strategy_registry.get(req.strategy) is None:
         raise HTTPException(status_code=400,
             detail=f"Unknown strategy '{req.strategy}'. Available: "
                    f"{[s.name for s in strategy_registry.available()]}")
-    if not strategy_registry.is_compatible(req.strategy, klass):
-        # Refused rather than accepted-and-silently-never-trading.
-        raise HTTPException(status_code=400,
-            detail=f"Strategy '{req.strategy}' does not support {klass} assets "
-                   f"(it declares applies_to='{strategy_registry.get(req.strategy).applies_to}')")
 
     old = state.strategy_class_defaults.get(klass)
     state.strategy_class_defaults[klass] = req.strategy
@@ -550,12 +600,11 @@ async def quant_library():
         "council_settings": {
             "analysis_interval_s": settings.ANALYSIS_INTERVAL_SECONDS,
             "adaptive_top_k": settings.ADAPTIVE_TOP_K,
-            "mc_min_tp_first_prob": settings.MC_MIN_TP_FIRST_PROB,
-            "entry_check": settings.COUNCIL_ENTRY_CHECK,
-            "exit_check": settings.COUNCIL_EXIT_CHECK,
+            # The council is information only: it never vetoes or closes a trade.
+            "entry_check": False,
+            "exit_check": False,
             "min_voters": settings.COUNCIL_MIN_VOTERS,
             "veto_consensus": settings.COUNCIL_VETO_CONSENSUS,
-            "exit_consensus": settings.COUNCIL_EXIT_CONSENSUS,
         },
     }
 
@@ -588,6 +637,45 @@ async def quant_analyze(symbol: str):
 async def quant_portfolio():
     """Portfolio analytics: ledger performance ratios and open-position VaR/CVaR."""
     return state.portfolio_analytics or {"status": "warming up"}
+
+
+@app.get("/api/smart-money")
+async def get_smart_money():
+    """Every smart-money symbol with its verdict (BUY / HOLD / AVOID), reasons, and why a BUY is not traded."""
+    _sm_cache["data"] = None
+    return _smart_money_snapshot()
+
+
+class RLModeRequest(BaseModel):
+    mode: str                      # auto | shadow | live | off
+
+
+@app.get("/api/rl")
+async def get_rl():
+    """The RL policy: mode, promotion gate, walk-forward results vs baselines, learning curve, decisions."""
+    from rl.live import runtime
+    from engine.learner import learner
+    return {**runtime.status(), "learner": learner.card(), "torch_available": learner.has_torch()}
+
+
+@app.post("/api/rl/mode")
+async def set_rl_mode(req: RLModeRequest):
+    """auto (trade only an approved policy), shadow (never trade), live (trade any deployed policy), off."""
+    from rl.live import runtime
+    try:
+        runtime.set_mode(req.mode)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    state.log_event("RL", f"RL mode set to {runtime.mode}"
+                          + (" (trades an unapproved policy)" if runtime.mode == "live" and not runtime.policy.approved else ""))
+    return {"mode": runtime.mode, "may_trade": runtime.may_trade()}
+
+
+@app.post("/api/rl/retrain")
+async def retrain_rl():
+    """Starts a retrain now (download new bars, warm-start PPO, champion/challenger deploy)."""
+    from engine.learner import learner
+    return {"result": await learner.retrain()}
 
 
 @app.get("/api/latency")
@@ -800,6 +888,11 @@ async def get_watchlist():
 @app.post("/api/watchlist")
 async def add_to_watchlist(req: WatchlistAddRequest):
     sym = req.symbol.upper().strip()
+    # US equity tickers only (letters, optionally one class suffix like BRK.B).
+    # Pairs such as BTC/USD are refused: the platform does not trade crypto.
+    if not re.fullmatch(r"[A-Z]{1,5}(\.[A-Z])?", sym):
+        raise HTTPException(status_code=400,
+                            detail=f"'{sym}' is not a US stock ticker. Only US equities are traded.")
     state.watchlist.add(sym)
     await market_stream.ensure_stock_subscription(sym)
     state.log_event("WATCHLIST", f"Added {sym} to active watchlist")
@@ -812,6 +905,7 @@ async def remove_from_watchlist(symbol: str):
         state.watchlist.remove(sym)
         state.log_event("WATCHLIST", f"Removed {sym} from active watchlist")
         discovery.on_unwatched(sym)
+        scout.on_unwatched(sym)
     return {"message": f"{sym} removed from watchlist", "watchlist": list(state.watchlist)}
 
 @app.get("/api/markets")
@@ -878,6 +972,56 @@ async def trigger_trend_sync():
 # ---------------------------------------------------------------------------
 # Discovery & diversification
 # ---------------------------------------------------------------------------
+
+@app.get("/api/desk")
+async def get_desk():
+    """The trade desk: its agents, cases under review, approvals and recent verdicts."""
+    from desk.desk import desk
+    return desk.snapshot()
+
+
+@app.get("/api/desk/case/{case_id}")
+async def get_desk_case(case_id: str):
+    """One case in full: the case file the models read and their complete reasoning."""
+    from desk.desk import desk
+    c = desk.case(case_id)
+    if c is None:
+        raise HTTPException(status_code=404, detail="no such case in memory")
+    return c
+
+
+@app.post("/api/desk/review/{symbol}")
+async def request_desk_review(symbol: str, observe_seconds: float = 0.0):
+    """Asks the desk to review a watched stock now (it still has to approve before any buy)."""
+    from desk.desk import desk
+    try:
+        return desk.review_now(symbol, max(0.0, min(observe_seconds, 600.0)))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/news/log")
+async def get_news_log(limit: int = 100):
+    """Ingested headlines with their entities, events and scores."""
+    from feeds.news_log import news_log
+    return news_log.snapshot(max(1, min(limit, 300)))
+
+
+@app.get("/api/scout")
+async def get_scout(limit: int = 30):
+    """Today's ranking, the picks on the watchlist, and the watcher's live read on each."""
+    return {**scout.snapshot(max(1, min(limit, 200))), "watcher": watcher.snapshot(),
+            "agent": scout.card()}
+
+
+@app.post("/api/scout/refresh")
+async def refresh_scout():
+    """Re-ranks now instead of waiting for the hourly run."""
+    if not settings.SCOUT_ENABLED:
+        raise HTTPException(status_code=400, detail="SCOUT_ENABLED is off")
+    await scout.step()
+    return {"status": "success", "picks": sorted(scout.picks), "ranked": len(scout.ranking)}
+
 
 @app.get("/api/discovery")
 async def get_discovery(status: Optional[str] = None, sector: Optional[str] = None,

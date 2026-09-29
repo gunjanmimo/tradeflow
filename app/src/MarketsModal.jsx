@@ -1,8 +1,7 @@
 import React, { useState } from 'react';
 
 const MARKET_LABELS = {
-  stocks: { title: 'Stocks', sub: 'US / EU equities, market hours', accent: 'emerald' },
-  crypto: { title: 'Crypto', sub: 'Trades 24/7', accent: 'cyan' },
+  stocks: { title: 'US stocks', sub: 'US-listed equities, market hours', accent: 'emerald' },
 };
 
 function Toggle({ on, onChange, disabled, label }) {
@@ -28,7 +27,7 @@ export function MarketsModal({ isOpen, onClose, markets, apiBase, positions, onC
   const [error, setError] = useState(null);
   if (!isOpen) return null;
 
-  const marketOn = markets?.markets || { stocks: true, crypto: true };
+  const marketOn = markets?.markets || { stocks: true };
   const symbols = markets?.symbols || [];
 
   async function post(path, body, key) {

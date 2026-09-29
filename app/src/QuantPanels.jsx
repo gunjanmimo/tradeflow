@@ -43,7 +43,6 @@ const STAGE_LABELS = {
   sentinel_tick: 'Trade bot per tick',
   order_submit: 'Order submit',
   order_close: 'Position close',
-  feed_crypto_poll: 'Crypto price poll',
   feed_stock_bar_age: 'Stock bar delivery',
   event_loop_lag: 'Event-loop lag',
   telemetry_build: 'Dashboard frame build',
@@ -257,7 +256,7 @@ export function QuantDeskCard({ analysis, portfolio, status, routing }) {
                   {pct(a.mc_p_tp_first)}
                 </td>
                 <td className="text-right px-3 font-mono text-slate-400">
-                  {a.pair_partner ? <span title={`vs ${a.pair_partner}`}>{a.pair_partner.replace('/USD', '')} <span className={a.pair_z <= -2 ? 'text-emerald-400' : a.pair_z >= 2 ? 'text-rose-400' : ''}>{num(a.pair_z, 1)}</span></span> : '—'}
+                  {a.pair_partner ? <span title={`vs ${a.pair_partner}`}>{a.pair_partner} <span className={a.pair_z <= -2 ? 'text-emerald-400' : a.pair_z >= 2 ? 'text-rose-400' : ''}>{num(a.pair_z, 1)}</span></span> : '—'}
                 </td>
               </tr>
             ))}

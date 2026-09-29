@@ -28,7 +28,7 @@ from collections import Counter, deque
 from typing import Any, Dict, List, Optional
 
 from core.config import settings
-from core.state import state, is_crypto_symbol
+from core.state import state
 from engine.decision_engine import decision_engine
 from engine.risk_guard import risk_guard
 from core.universe import universe
@@ -145,7 +145,7 @@ class PortfolioManager:
                 continue
             tick = state.latest_prices.get(sym)
             row: Dict[str, Any] = {
-                "symbol": sym, "crypto": is_crypto_symbol(sym), "price": None,
+                "symbol": sym, "price": None,
                 "chg_1m_pct": None, "chg_5m_pct": None,
                 "price_age_s": None, "tick_age_s": None, "status": "", "verdict": "",
             }
@@ -165,14 +165,13 @@ class PortfolioManager:
                 row["status"] = status
                 blocked[label or status] += 1
 
-            if not is_crypto_symbol(sym):
-                if session not in (REGULAR, PRE):
-                    skip("market closed", "stock market closed")
-                    continue
-                mins = minutes_to_close(sym)
-                if mins is not None and mins <= cutoff:
-                    skip("near close", "too close to the market close")
-                    continue
+            if session not in (REGULAR, PRE):
+                skip("market closed", "stock market closed")
+                continue
+            mins = minutes_to_close(sym)
+            if mins is not None and mins <= cutoff:
+                skip("near close", "too close to the market close")
+                continue
             if tick is None:
                 skip("no price", "no price yet")
                 continue
@@ -191,19 +190,14 @@ class PortfolioManager:
             if now - self._attempted.get(sym, 0.0) < settings.MANAGER_RETRY_SECONDS:
                 skip("retry wait", "entry recently refused")
                 continue
-            # Understand the time series before anything else: no trend read, or
-            # a trend that is not up, and the strategy is not even consulted.
-            if not tr.ready:
-                skip("learning trend", "trend: not enough history")
+            # One symbol's failure is that symbol's problem: it used to abort the
+            # whole cycle, so a single bad read stopped every entry.
+            try:
+                decision = decision_engine.evaluate(sym, quant, state.get_sentiment(sym))
+            except Exception as e:
+                logger.error(f"Entry evaluation failed for {sym}: {type(e).__name__}: {e}", exc_info=True)
+                skip("error", f"evaluation error: {type(e).__name__}")
                 continue
-            if tr.reversal_down:
-                skip("turning down", "trend: turning down")
-                continue
-            if tr.direction < settings.TREND_ENTRY_MIN:
-                skip(f"trend {tr.label}", f"trend: {tr.label}")
-                continue
-
-            decision = decision_engine.evaluate(sym, quant, state.get_sentiment(sym))
             row["buy_prob"] = round(float(decision.buy_prob), 3)
             if decision.action != "BUY":
                 gate = state.last_gate_detail.get(sym) or {}
@@ -233,9 +227,9 @@ class PortfolioManager:
             if plan is None or plan["qty"] <= 0:
                 blocked["sizing: nothing affordable"] += 1
                 continue
-            tr = c["trend"]
-            # Strategy conviction, confirmed by how strongly the time series trends.
-            conviction = 0.6 * float(c["decision"].buy_prob) + 0.4 * (0.5 + 0.5 * tr.direction)
+            # The strategy's own conviction: the trend read is shown, not scored,
+            # so the ranking adds nothing the strategy's backtest did not see.
+            conviction = float(c["decision"].buy_prob)
             meta = universe.classify(c["symbol"])
             ranked.append({
                 **c, "conviction": round(conviction, 3), "fit": round(fit, 3),
@@ -279,6 +273,12 @@ class PortfolioManager:
         blocked: Counter = Counter()
 
         cands = self._gather(now, blocked)
+        try:
+            from engine.thoughts import thoughts
+            thoughts.update(self.watch, now)      # the dashboard's view of what the agents think
+        except Exception as e:
+            logger.debug(f"Thought stream update failed: {e}")
+        self._shadow_rl()
         await asyncio.sleep(0)
 
         # Only ask the risk guard once trading is on: paused, it would refuse every
@@ -295,6 +295,12 @@ class PortfolioManager:
 
         entered: List[Dict[str, Any]] = []
         ranked = self._rank(cands, blocked)
+        # The trade desk watches and argues every ranked signal; only what it has
+        # approved is deployed (desk/desk.py). Paused, nothing is sent for review.
+        reviewing = active or settings.DESK_REVIEW_WHEN_PAUSED
+        all_ranked = ranked
+        if reviewing:
+            ranked = self._through_desk(ranked, blocked)
 
         if active:
             for _ in range(settings.MANAGER_MAX_ENTRIES_PER_CYCLE):
@@ -302,7 +308,8 @@ class PortfolioManager:
                     break
                 best = ranked[0]
                 sym = best["symbol"]
-                if state.remaining_budget < (15.0 if is_crypto_symbol(sym) else 30.0):
+                from engine.risk_guard import MIN_ORDER_DOLLARS
+                if state.remaining_budget < MIN_ORDER_DOLLARS:
                     break
                 self._attempted[sym] = time.time()
                 state.log_event(
@@ -321,15 +328,51 @@ class PortfolioManager:
                                        "sector": best["sector"], "region": best["region"]}
                 # The book changed (or the entry was refused): re-rank the rest.
                 cands = [c for c in cands if c["symbol"] != sym]
-                ranked = self._rank(cands, Counter())
+                ranked = self._through_desk(self._rank(cands, Counter()), Counter())
 
-        self.picks = [self._pick_view(r) for r in ranked[:MAX_PICKS_SHOWN]]
+        self.picks = [self._pick_view(r) for r in all_ranked[:MAX_PICKS_SHOWN]]
         self.blocked_by = dict(blocked.most_common(6))
-        self.status = self._describe(active, profile, entered, ranked, blocked, executor)
+        pending = [r for r in all_ranked if r.get("desk") not in (None, "cleared")] if reviewing else []
+        self.status = self._describe(active, profile, entered, ranked, blocked, executor, pending)
         self.cycles += 1
         self.last_cycle_at = time.time()
         self.last_cycle_ms = (time.perf_counter() - t0) * 1000
         self._log_transition()
+
+    @staticmethod
+    def _through_desk(ranked: List[Dict[str, Any]], blocked: Counter) -> List[Dict[str, Any]]:
+        """Hands each ranked signal to the trade desk; returns the ones it has approved."""
+        from desk.desk import desk
+        if not desk.enabled:
+            return ranked
+        cleared = []
+        for r in ranked:
+            gate = state.last_gate_detail.get(r["symbol"]) or {}
+            r["desk"] = desk.propose(r["symbol"], float(r["decision"].buy_prob), r["decision"].reason,
+                                     gate.get("selected_strategy") or gate.get("strategy") or "?", r["plan"])
+            if r["desk"] == "cleared":
+                cleared.append(r)
+            else:
+                blocked[f"desk: {r['desk']}"] += 1
+        return cleared
+
+    def _shadow_rl(self):
+        """
+        When another strategy trades, the RL policy still decides for every
+        watched stock (as if flat) and logs it, so its live record keeps
+        growing while it places no orders. Decisions are cached per 5-minute
+        decision bar, so this costs a dictionary lookup on most cycles.
+        """
+        if state.strategy_class_defaults.get("equity") == "rl_ppo":
+            return
+        try:
+            from rl.live import runtime
+            if runtime.mode == "off" or not runtime.ready():
+                return
+            for sym in sorted(state.watchlist):
+                runtime.decide(sym, None)
+        except Exception as e:
+            logger.debug(f"Shadow RL decision failed: {e}")
 
     @staticmethod
     def _slots(executor) -> int:
@@ -340,9 +383,9 @@ class PortfolioManager:
     def _pick_view(r: Dict[str, Any]) -> Dict[str, Any]:
         return {"symbol": r["symbol"], "score": r["score"], "conviction": r["conviction"],
                 "fit": r["fit"], "sector": r["sector"], "region": r["region"], "why": r["why"],
-                "plan": r["plan"], "trend": r["trend"].brief()}
+                "plan": r["plan"], "trend": r["trend"].brief(), "desk": r.get("desk")}
 
-    def _describe(self, active, profile, entered, ranked, blocked, executor) -> Dict[str, Any]:
+    def _describe(self, active, profile, entered, ranked, blocked, executor, pending=()) -> Dict[str, Any]:
         cap = state.hard_cap
         idle = state.remaining_budget
         slots = self._slots(executor)
@@ -359,10 +402,13 @@ class PortfolioManager:
         elif slots <= 0:
             st, msg = "full", (f"All {profile.max_concurrent_positions} position slots are used at risk dial "
                                f"{profile.factor}; ${idle:,.2f} idle cannot be deployed until one closes.")
-        elif idle < 15.0:
+        elif idle < 30.0:
             st, msg = "full", f"Budget fully committed (${idle:,.2f} left)."
         elif ranked:
             st, msg = "active", f"{len(ranked)} entries ranked; the best goes in next cycle."
+        elif pending:
+            st, msg = "reviewing", ("With the trade desk: " + ", ".join(f"{r['symbol']} ({r['desk']})" for r in pending[:4])
+                                    + f". Nothing is bought until it approves; ${idle:,.2f} of budget idle.")
         else:
             n = len(self.watch)
             st, msg = "watching", (

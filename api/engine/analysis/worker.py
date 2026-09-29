@@ -89,13 +89,13 @@ def engle_granger(pa: np.ndarray, pb: np.ndarray) -> Optional[Dict[str, float]]:
 
 
 def scan_pairs(symbols: Dict[str, Dict]) -> Dict[str, Dict]:
-    """Best cointegrated partner per symbol, within the same asset class."""
+    """Best cointegrated partner per symbol."""
     best: Dict[str, Dict] = {}
     names = [s for s, d in symbols.items() if len(d["prices"]) >= MIN_PAIR_SAMPLES]
     for a in names:
         da = symbols[a]
         for b in names:
-            if a == b or symbols[b]["is_crypto"] != da["is_crypto"]:
+            if a == b:
                 continue
             db = symbols[b]
             pa, pb = _align(da["times"], da["prices"], db["times"], db["prices"])
@@ -292,7 +292,7 @@ def _run_cycle(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         series = PriceSeries(d["prices"], d["volumes"])
         ctx = StrategyContext(
             symbol=sym, price=d["price"], quant=d["quant"], sentiment=d["sentiment"],
-            consensus=d["consensus"], is_crypto=d["is_crypto"], series=series,
+            consensus=d["consensus"], series=series,
         )
         ctx._min_buy_prob = snapshot["min_buy_prob"]
         report = convene(ctx)

@@ -27,7 +27,7 @@ import numpy as np
 
 from core.config import settings
 from core.latency import latency
-from core.state import state, is_crypto_symbol
+from core.state import state
 
 logger = logging.getLogger("tradeflow.analysis")
 
@@ -116,7 +116,6 @@ class AnalysisService:
                 "quant": q,
                 "sentiment": state.get_sentiment(sym),
                 "consensus": trend_aggregator.get_consensus(sym),
-                "is_crypto": is_crypto_symbol(sym),
                 "sl_dist": abs(tick.price - sl),
                 "tp_dist": abs(tp - tick.price),
                 "position": ({"qty": float(pos.get("qty") or 0.0),

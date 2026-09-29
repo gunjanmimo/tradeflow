@@ -7,23 +7,28 @@ capex cycle; the engine could not see that because nothing knew what a symbol wa
 Classification order (first hit wins):
   1. The curated table below: GICS sector leaders, defence/biotech/energy themes,
      US-listed ADRs of UK/European/Asian companies, and sector/country ETFs.
-  2. Crypto pairs: one "Crypto" sleeve.
-  3. SEC EDGAR SIC code, fetched lazily for US tickers we have never seen
+  2. SEC EDGAR SIC code, fetched lazily for US tickers we have never seen
      (e.g. an insider buy discovered via Form 4). SIC is not GICS, so the mapping
      is approximate and marked source="sec_sic".
-  4. Foreign listing suffix (".L", ".NS", ".HK"...): country is known, and a
+  3. Foreign listing suffix (".L", ".NS", ".HK"...): country is known, and a
      US-listed ADR is substituted where one exists. Without one the symbol is
      visible for discovery but not tradable on Alpaca; a country ETF is offered
      as the tradable proxy.
-  5. Otherwise "Unclassified" -- still capped like any sector, never exempt.
+  4. Otherwise "Unclassified" -- still capped like any sector, never exempt.
 """
 import asyncio
+import json
 import logging
+import os
+import re
 import time
 from dataclasses import dataclass, asdict
 from typing import Dict, Optional, Tuple, List, Any
 
 logger = logging.getLogger("tradeflow.universe")
+
+_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+_PATH = os.path.join(_DATA_DIR, "universe_sec.json")
 
 # The 11 GICS sectors, plus sleeves that are not GICS sectors.
 GICS_SECTORS = (
@@ -31,7 +36,6 @@ GICS_SECTORS = (
     "Consumer Discretionary", "Health Care", "Industrials", "Consumer Staples",
     "Energy", "Utilities", "Materials", "Real Estate",
 )
-CRYPTO = "Crypto"
 DIVERSIFIED = "Diversified"      # broad/country ETFs: diversified by construction
 COMMODITIES = "Commodities"
 UNCLASSIFIED = "Unclassified"
@@ -46,8 +50,8 @@ SECTOR_ETF = {
     "Energy": "XLE", "Utilities": "XLU", "Materials": "XLB", "Real Estate": "XLRE",
 }
 
-US, EUROPE, ASIA, REGION_CRYPTO, GLOBAL, OTHER = (
-    "US", "Europe/UK", "Asia", "Crypto", "Global", "Other")
+US, EUROPE, ASIA, GLOBAL, OTHER = (
+    "US", "Europe/UK", "Asia", "Global", "Other")
 
 _COUNTRY_REGION = {
     "US": US,
@@ -55,8 +59,10 @@ _COUNTRY_REGION = {
     "France": EUROPE, "Netherlands": EUROPE, "Denmark": EUROPE,
     "Switzerland": EUROPE, "Sweden": EUROPE, "Norway": EUROPE, "Italy": EUROPE,
     "Spain": EUROPE, "Finland": EUROPE, "Belgium": EUROPE, "Portugal": EUROPE,
+    "Ireland": EUROPE, "Luxembourg": EUROPE, "Austria": EUROPE, "Greece": EUROPE, "Poland": EUROPE,
     "China": ASIA, "Hong Kong": ASIA, "India": ASIA, "Japan": ASIA,
-    "Taiwan": ASIA, "South Korea": ASIA, "Singapore": ASIA,
+    "Taiwan": ASIA, "South Korea": ASIA, "Singapore": ASIA, "Indonesia": ASIA,
+    "Thailand": ASIA, "Malaysia": ASIA, "Philippines": ASIA, "Vietnam": ASIA,
     "Global": GLOBAL,
 }
 
@@ -87,7 +93,7 @@ class SymbolMeta:
     country: str
     region: str
     currency: str
-    asset_type: str           # "stock" | "adr" | "etf" | "crypto" | "foreign"
+    asset_type: str           # "stock" | "adr" | "etf" | "foreign"
     source: str               # "curated" | "rule" | "sec_sic" | "suffix" | "unknown"
     tradable_on_alpaca: bool = True
     proxy: Optional[str] = None   # tradable substitute when not directly tradable
@@ -304,6 +310,44 @@ _US_STATES = frozenset(
 )
 
 
+# Where a company is incorporated says little about where it does business when
+# it is one of these (Alibaba and ZTO are Cayman companies operating in China).
+_HAVENS = frozenset({"CAYMAN ISLANDS", "BERMUDA", "BRITISH VIRGIN ISLANDS", "VIRGIN ISLANDS, BRITISH",
+                     "JERSEY", "GUERNSEY", "ISLE OF MAN", "MARSHALL ISLANDS", "PANAMA", "CURACAO",
+                     "BAHAMAS", "GIBRALTAR", "MAURITIUS"})
+_COUNTRY_ALIASES = {
+    "UNITED KINGDOM": "UK", "ENGLAND": "UK", "KOREA, REPUBLIC OF": "South Korea", "KOREA (SOUTH)": "South Korea",
+    "SOUTH KOREA": "South Korea", "KOREA": "South Korea", "TAIWAN, PROVINCE OF CHINA": "Taiwan",
+    "TAIWAN": "Taiwan", "CHINA": "China", "HONG KONG": "Hong Kong", "NETHERLANDS": "Netherlands",
+}
+# Forms only foreign private issuers file: a 20-F filer is not a US company,
+# whatever mailing address it gives the SEC.
+_FOREIGN_FORMS = frozenset({"20-F", "40-F", "6-K", "20-F/A", "40-F/A"})
+_ADR_NAME = re.compile(r"\b(ADR|ADS|American Depositary|Depositary Shares?|Sponsored|Unsponsored)\b", re.IGNORECASE)
+_NAME_COUNTRY = re.compile(r"\(([A-Za-z .]+)\)\s*$")
+
+
+def normalize_country(desc: str) -> Optional[str]:
+    """An SEC/Alpaca country description as one of our country names; None for a haven or a US state."""
+    d = (desc or "").strip().upper()
+    if not d or d in _HAVENS or d in _US_STATES or d in ("UNITED STATES", "USA", "U.S.A."):
+        return None
+    return _COUNTRY_ALIASES.get(d) or d.title()
+
+
+def country_from_name(name: str) -> Optional[str]:
+    """
+    What an Alpaca asset name says about the issuer's country: "SIEMENS AG SPONSORED
+    ADR (Germany)" -> Germany; any other depositary receipt -> "Non-US"; else None.
+    """
+    m = _NAME_COUNTRY.search(name or "")
+    if m:
+        c = normalize_country(m.group(1))
+        if c:
+            return c
+    return "Non-US" if _ADR_NAME.search(name or "") else None
+
+
 def _norm_foreign(code: str) -> str:
     """'NOVO-B.CO' and 'NOVOB.CO' are the same listing."""
     base, _, suffix = code.upper().partition(".")
@@ -316,10 +360,9 @@ def region_of(country: str) -> str:
 
 def _meta(symbol, name, sector, theme, country, asset_type, source,
           tradable=True, proxy=None) -> SymbolMeta:
-    region = REGION_CRYPTO if asset_type == "crypto" else region_of(country)
     return SymbolMeta(
         symbol=symbol, name=name, sector=sector, theme=theme, country=country,
-        region=region, currency="USD" if asset_type in ("crypto", "adr", "etf", "stock")
+        region=region_of(country), currency="USD" if asset_type in ("adr", "etf", "stock")
         else _COUNTRY_CURRENCY.get(country, "?"),
         asset_type=asset_type, source=source, tradable_on_alpaca=tradable, proxy=proxy,
     )
@@ -400,6 +443,7 @@ class Universe:
 
     def __init__(self):
         self._dynamic: Dict[str, SymbolMeta] = {}
+        self._loaded = False
         self._ticker_cik: Dict[str, int] = {}
         self._ticker_map_at: float = 0.0
         self._sec_failed: Dict[str, float] = {}
@@ -411,8 +455,9 @@ class Universe:
         if m:
             return m
         if "/" in sym:
-            base = sym.split("/")[0]
-            return _meta(sym, base, CRYPTO, "Crypto", "Global", "crypto", "rule")
+            # A currency or crypto pair: not a US equity, never tradable here.
+            return _meta(sym, sym, UNCLASSIFIED, "", "Global", "foreign", "rule", tradable=False)
+        self._load()
         m = self._dynamic.get(sym)
         if m:
             return m
@@ -496,23 +541,66 @@ class Universe:
                             self._sec_failed[sym] = time.time()
             except Exception as e:
                 logger.warning(f"SEC classification unavailable: {e}")
+        if added:
+            self._save()
         return added
 
     @staticmethod
     def _from_submission(sym: str, sub: Dict[str, Any]) -> Optional[SymbolMeta]:
+        """
+        Sector from the SIC code. Country, first hit wins: the business address
+        (unless a US state), the place of incorporation (unless a tax haven),
+        then "Non-US" for a filer of foreign-issuer forms (20-F, 40-F, 6-K),
+        else US. Missing data never makes a foreign company count as American
+        once it files like a foreign one.
+        """
         try:
             sic = int(sub.get("sic") or 0)
         except (TypeError, ValueError):
             sic = 0
         if not sic:
             return None
-        where = ((sub.get("addresses") or {}).get("business") or {}).get("stateOrCountry") or ""
-        country = "US" if where.upper() in _US_STATES else (f"Non-US ({where})" if where else "US")
+        biz = (sub.get("addresses") or {}).get("business") or {}
+        code = (biz.get("stateOrCountry") or "").upper()
+        forms = set(((sub.get("filings") or {}).get("recent") or {}).get("form") or [])
+        foreign_filer = bool(forms & _FOREIGN_FORMS)
+        country = None
+        if code not in _US_STATES or foreign_filer:
+            country = (normalize_country(biz.get("stateOrCountryDescription") or "")
+                       or normalize_country(sub.get("stateOfIncorporationDescription") or ""))
+        if country is None:
+            country = "Non-US" if (foreign_filer or (code and code not in _US_STATES)) else "US"
         return SymbolMeta(
             symbol=sym, name=(sub.get("name") or sym).title(), sector=sic_to_sector(sic),
             theme=(sub.get("sicDescription") or "").capitalize(), country=country,
-            region=region_of(country), currency="USD", asset_type="stock", source="sec_sic",
+            region=region_of(country), currency="USD",
+            asset_type="stock" if country == "US" else "adr", source="sec_sic",
         )
+
+    # ------------------------------------------------------------------
+    # The SEC lookups survive restarts (data/universe_sec.json)
+    # ------------------------------------------------------------------
+
+    def _load(self):
+        if self._loaded:
+            return
+        self._loaded = True
+        try:
+            with open(_PATH) as f:
+                for sym, d in json.load(f).items():
+                    self._dynamic[sym] = SymbolMeta(**d)
+        except (OSError, ValueError, TypeError):
+            pass
+
+    def _save(self):
+        try:
+            os.makedirs(_DATA_DIR, exist_ok=True)
+            tmp = _PATH + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({s: asdict(m) for s, m in self._dynamic.items()}, f)
+            os.replace(tmp, _PATH)
+        except OSError as e:
+            logger.warning(f"Could not save SEC classifications: {e}")
 
 
 universe = Universe()

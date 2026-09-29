@@ -30,11 +30,14 @@ class DailyBarCache:
     def __init__(self):
         # symbol -> (day numbers since epoch, adjusted closes)
         self.series: Dict[str, tuple] = {}
+        # symbol -> average daily dollar volume over the last 20 sessions
+        self.dollar_volume: Dict[str, float] = {}
+        # symbol -> (highs, lows, volumes), aligned with series[symbol]
+        self.hlv: Dict[str, tuple] = {}
         self.fetched_at: Dict[str, float] = {}
         self.last_error: Optional[str] = None
         self.last_refresh_at: float = 0.0
         self._stock_client = None
-        self._crypto_client = None
         self._lock = asyncio.Lock()
 
     @property
@@ -44,12 +47,10 @@ class DailyBarCache:
 
     def _clients(self):
         if self._stock_client is None:
-            from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
+            from alpaca.data.historical import StockHistoricalDataClient
             self._stock_client = StockHistoricalDataClient(
                 settings.ALPACA_API_KEY, settings.ALPACA_SECRET_KEY)
-            self._crypto_client = CryptoHistoricalDataClient(
-                settings.ALPACA_API_KEY, settings.ALPACA_SECRET_KEY)
-        return self._stock_client, self._crypto_client
+        return self._stock_client
 
     def closes(self, symbol: str) -> Optional[np.ndarray]:
         s = self.series.get(symbol)
@@ -73,13 +74,10 @@ class DailyBarCache:
             return 0
         async with self._lock:
             loop = asyncio.get_running_loop()
-            stocks = [s for s in todo if "/" not in s and _US_TICKER.match(s)]
-            cryptos = [s for s in todo if "/" in s]
+            stocks = [s for s in todo if _US_TICKER.match(s)]
             got = 0
             for i in range(0, len(stocks), 100):
-                got += await loop.run_in_executor(None, self._fetch_sync, stocks[i:i + 100], False)
-            for i in range(0, len(cryptos), 100):
-                got += await loop.run_in_executor(None, self._fetch_sync, cryptos[i:i + 100], True)
+                got += await loop.run_in_executor(None, self._fetch_sync, stocks[i:i + 100])
             # Mark attempted symbols so an unknown ticker is not re-requested
             # every cycle; it is retried when max_age_s elapses.
             for s in todo:
@@ -87,30 +85,26 @@ class DailyBarCache:
             self.last_refresh_at = now
             return got
 
-    def _fetch_sync(self, symbols: List[str], crypto: bool) -> int:
-        from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
+    def _fetch_sync(self, symbols: List[str]) -> int:
+        from alpaca.data.requests import StockBarsRequest
         from alpaca.data.timeframe import TimeFrame
         from alpaca.data.enums import Adjustment, DataFeed
 
-        stock_client, crypto_client = self._clients()
+        stock_client = self._clients()
         # Free data plans may not query the most recent 15 minutes of SIP data.
         end = datetime.now(timezone.utc) - timedelta(minutes=20)
         start = end - timedelta(days=settings.DAILY_BARS_LOOKBACK_DAYS)
         try:
-            if crypto:
-                resp = crypto_client.get_crypto_bars(CryptoBarsRequest(
-                    symbol_or_symbols=symbols, timeframe=TimeFrame.Day, start=start, end=end))
-            else:
-                try:
-                    resp = stock_client.get_stock_bars(StockBarsRequest(
-                        symbol_or_symbols=symbols, timeframe=TimeFrame.Day, start=start,
-                        end=end, adjustment=Adjustment.ALL))
-                except Exception as e:
-                    if "subscription" not in str(e).lower():
-                        raise
-                    resp = stock_client.get_stock_bars(StockBarsRequest(
-                        symbol_or_symbols=symbols, timeframe=TimeFrame.Day, start=start,
-                        end=end, adjustment=Adjustment.ALL, feed=DataFeed.IEX))
+            try:
+                resp = stock_client.get_stock_bars(StockBarsRequest(
+                    symbol_or_symbols=symbols, timeframe=TimeFrame.Day, start=start,
+                    end=end, adjustment=Adjustment.ALL))
+            except Exception as e:
+                if "subscription" not in str(e).lower():
+                    raise
+                resp = stock_client.get_stock_bars(StockBarsRequest(
+                    symbol_or_symbols=symbols, timeframe=TimeFrame.Day, start=start,
+                    end=end, adjustment=Adjustment.ALL, feed=DataFeed.IEX))
         except Exception as e:
             self.last_error = f"{type(e).__name__}: {str(e)[:160]}"
             logger.warning(f"Daily bars fetch failed for {symbols[:3]}...: {self.last_error}")
@@ -122,10 +116,15 @@ class DailyBarCache:
                 continue
             days = np.array([int(b.timestamp.timestamp() // 86400) for b in bars], dtype=np.int64)
             closes = np.array([float(b.close) for b in bars], dtype=float)
+            highs = np.array([float(b.high) for b in bars], dtype=float)
+            lows = np.array([float(b.low) for b in bars], dtype=float)
+            vols = np.array([float(b.volume or 0.0) for b in bars], dtype=float)
             ok = closes > 0
             if ok.sum() < 20:
                 continue
             self.series[sym] = (days[ok], closes[ok])
+            self.hlv[sym] = (highs[ok], lows[ok], vols[ok])
+            self.dollar_volume[sym] = float((closes[ok] * vols[ok])[-20:].mean())
             got += 1
         self.last_error = None
         return got
@@ -136,11 +135,8 @@ class DailyBarCache:
 
     def aligned_returns(self, symbols: List[str], window: int) -> Optional[tuple]:
         """
-        Daily log returns over the last `window` common trading days.
-
-        Crypto trades 7 days a week and stocks 5, so series are aligned on the
-        days they share; a weekend move in crypto shows up in Monday's return.
-        Returns (symbols_kept, matrix[n_symbols, n_days]) or None.
+        Daily log returns over the last `window` common trading days, aligned
+        on the days every series shares. Returns (symbols_kept, matrix[n_symbols, n_days]) or None.
         """
         kept = [s for s in symbols if s in self.series]
         if not kept:

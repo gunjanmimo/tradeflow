@@ -3,7 +3,13 @@ import { LatencyChip, LatencyPanel, QuantDeskCard } from './QuantPanels';
 import { CapitalModeChip, CapitalPlanPanel } from './CapitalPlan';
 import { DiscoveryChip, DiscoveryPanel } from './DiscoveryPanel';
 import { ManagerChip, ManagerPanel } from './ManagerPanel';
-import { DailyPnlChip, DailyPnlCalculatorModal, IncomeChip } from './DailyPnlCalculator';
+import { DailyPnlChip, DailyPnlCalculatorModal } from './DailyPnlCalculator';
+import { RLChip, RLPanel } from './RLPanel';
+import { SmartMoneyPanel } from './SmartMoneyPanel';
+import { ScoutPanel } from './ScoutPanel';
+import { DeskPanel } from './DeskPanel';
+import { NewsIngestPanel } from './NewsIngestPanel';
+import { setDisplayTz, clockTime } from './timefmt';
 import { MarketsModal } from './MarketsModal';
 import { HugeiconsIcon } from '@hugeicons/react';
 import { 
@@ -103,8 +109,9 @@ function Modal({ title, icon, onClose, children, wide = false, xl = false }) {
   );
 }
 
-const API_BASE = "http://localhost:8000";
-const WS_URL = "ws://localhost:8000/ws";
+// Override with VITE_API_BASE (e.g. http://localhost:8001) to point the dashboard at another backend.
+const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+const WS_URL = API_BASE.replace(/^http/, "ws") + "/ws";
 
 export default function App() {
   const [connected, setConnected] = useState(false);
@@ -135,7 +142,6 @@ export default function App() {
 
   const [newSymbol, setNewSymbol] = useState("");
   const [isSyncingTrends, setIsSyncingTrends] = useState(false);
-  const [assetFilter, setAssetFilter] = useState("ALL"); // "ALL", "STOCKS", "CRYPTO"
   const [experts, setExperts] = useState([]);
   
   // Interactive Trading Budget Controls
@@ -161,6 +167,7 @@ export default function App() {
   const [isCapitalOpen, setIsCapitalOpen] = useState(false);
   const [isDiscoveryOpen, setIsDiscoveryOpen] = useState(false);
   const [isManagerOpen, setIsManagerOpen] = useState(false);
+  const [isRLOpen, setIsRLOpen] = useState(false);
   const [isPnlCalcOpen, setIsPnlCalcOpen] = useState(false);
   const [isMarketsOpen, setIsMarketsOpen] = useState(false);
   const [clientLatency, setClientLatency] = useState({ rttMs: null, rttP95: null, frameMs: null, ageMs: null });
@@ -169,8 +176,6 @@ export default function App() {
   const lastFrameRef = useRef(null);
   const frameGapRef = useRef(null);
   const frameAgeRef = useRef(null);
-
-  const isCrypto = (sym) => sym.includes('/USD') || ['BTC', 'ETH', 'SOL'].includes(sym);
 
   // Live portfolio risk from telemetry, and the limits for the dial position the
   // user is currently looking at (which may lead telemetry by one round-trip).
@@ -272,6 +277,7 @@ export default function App() {
           }
           lastFrameRef.current = now;
           if (data.server_time) frameAgeRef.current = Math.max(0, Date.now() - data.server_time * 1000);
+          setDisplayTz(data.market_clock?.display_tz);
           setTelemetry(data);
         } catch (e) {
           console.error("WS Parse error", e);
@@ -392,7 +398,6 @@ export default function App() {
   const hardCap = telemetry.budget?.hard_cap ?? telemetry.budget?.allocated_capital ?? 0;
   const dailyPnl = telemetry.daily_pnl || {};
   const dailyNetPnl = Number(dailyPnl.net_pnl ?? ((rp.realized_pnl_today || 0) + totalPnL));
-  const trendsList = Object.values(telemetry.aggregated_trends || {});
   const clock = telemetry.market_clock || {};
 
   return (
@@ -401,28 +406,27 @@ export default function App() {
       <header className="sticky top-0 z-50 border-b border-white/5 bg-[#0b111c]/80 backdrop-blur-xl">
         <div className="px-6 h-16 flex items-center justify-between gap-4">
           {/* Brand */}
-          <div className="flex items-center gap-3 min-w-0">
+          <div className="flex items-center gap-3 shrink-0">
             <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-emerald-500 to-cyan-500 flex items-center justify-center shadow-lg shadow-emerald-500/20 shrink-0">
               <Zap className="w-5 h-5 text-slate-950 fill-current" />
             </div>
             <div className="min-w-0">
               <h1 className="font-semibold text-lg leading-tight tracking-tight text-white">TradeFlow</h1>
-              <p className="hidden md:block text-[11px] text-slate-500 truncate">{['Own stock score', ...(telemetry.source_health?.real_sources_available || []), 'Laya news', 'Alpaca Paper'].join(' · ')}</p>
+              <p className="hidden md:block text-[11px] text-slate-500 truncate">{['US stocks', 'RL policy (PPO)', ...(telemetry.source_health?.real_sources_available || []), 'Alpaca Paper'].join(' · ')}</p>
             </div>
           </div>
 
-          {/* Market status: one pill that says whether stocks are trading, plus always-on crypto */}
+          {/* Market status: one pill that says whether stocks are trading */}
           {(() => {
             const stocksLive = clock.is_us_market_open || clock.is_eu_market_open;
             const venues = [clock.is_us_market_open && 'US', clock.is_eu_market_open && 'EU'].filter(Boolean).join(' + ');
             const stocksOn = telemetry.markets?.markets?.stocks !== false;
-            const cryptoOn = telemetry.markets?.markets?.crypto !== false;
             return (
               <div
-                className="hidden lg:flex items-center rounded-full bg-white/[0.03] ring-1 ring-white/10 text-xs font-medium"
-                title={stocksLive ? `Stock markets open: ${venues}` : `Stock markets closed · next US open: ${clock.next_us_open || '09:30 AM EST'}`}
+                className="hidden min-[2100px]:flex items-center rounded-full bg-white/[0.03] ring-1 ring-white/10 text-xs font-medium"
+                title={stocksLive ? `Stock markets open: ${venues}` : `Stock markets closed · next US open: ${clock.next_us_open_local || clock.next_us_open || '—'}`}
               >
-                <button type="button" onClick={() => setIsMarketsOpen(true)} className="flex items-center gap-2 pl-3 pr-3 py-1.5 rounded-l-full hover:bg-white/[0.05] transition-colors">
+                <button type="button" onClick={() => setIsMarketsOpen(true)} className="flex items-center gap-2 pl-3 pr-3 py-1.5 rounded-full hover:bg-white/[0.05] transition-colors">
                   <span className={`w-2 h-2 rounded-full ${!stocksOn ? 'bg-rose-500' : stocksLive ? 'bg-emerald-400 animate-pulse shadow-[0_0_8px] shadow-emerald-400' : 'bg-slate-500'}`} />
                   <span className="text-slate-400">Stocks</span>
                   <span className={stocksLive ? 'text-emerald-300 font-semibold' : 'text-slate-300'}>
@@ -430,20 +434,25 @@ export default function App() {
                   </span>
                   {!stocksOn && <span className="text-rose-300 font-semibold">· OFF</span>}
                 </button>
-                <span className="w-px h-4 bg-white/10" />
-                <button type="button" onClick={() => setIsMarketsOpen(true)} className="flex items-center gap-2 pl-3 pr-3 py-1.5 rounded-r-full hover:bg-white/[0.05] transition-colors" title="Crypto trades 24/7 · click to switch markets on/off">
-                  <span className={`w-2 h-2 rounded-full ${cryptoOn ? 'bg-cyan-400 animate-pulse' : 'bg-rose-500'}`} />
-                  <span className="text-slate-400">Crypto</span>
-                  <span className={cryptoOn ? 'text-cyan-300 font-semibold' : 'text-rose-300 font-semibold'}>{cryptoOn ? '24/7' : 'OFF'}</span>
-                </button>
               </div>
             );
           })()}
 
+          {/* Your clock, and when the US session opens or closes in your timezone */}
+          <div className="hidden sm:flex flex-col items-end leading-tight shrink-0" title={`Times shown in ${clock.display_tz || 'Europe/Paris'}; New York: ${clock.current_time_ny || ''}`}>
+            <span className="font-mono text-sm text-slate-200">{clock.current_time_local || ''}</span>
+            <span className="text-[10px] text-slate-500">
+              {clock.us_session === 'regular'
+                ? `US open · closes ${clock.next_us_close_local || ''}`
+                : clock.us_session === 'pre' ? `US pre-market · opens ${clock.next_us_open_local || ''}`
+                : `US opens ${clock.next_us_open_local || '—'}`}
+            </span>
+          </div>
+
           {/* Right cluster: stat chips + actions */}
           <div className="flex items-center gap-2">
             {/* Main Broker Equity (Locked outside bot budget) */}
-            <div className="hidden xl:flex flex-col items-end px-3 py-1 rounded-xl bg-white/[0.02] ring-1 ring-white/5" title="Main broker equity is locked outside bot budget. Bot cannot touch outside the cap.">
+            <div className="hidden min-[2100px]:flex flex-col items-end px-3 py-1 rounded-xl bg-white/[0.02] ring-1 ring-white/5" title="Main broker equity is locked outside bot budget. Bot cannot touch outside the cap.">
               <span className="text-[10px] uppercase tracking-wider text-slate-500 flex items-center gap-1">
                 <Lock className="w-2.5 h-2.5 text-amber-400" />
                 Broker equity
@@ -470,6 +479,9 @@ export default function App() {
 
             {/* Discovery chip -> candidates, diversification and portfolio risk */}
             <DiscoveryChip brief={telemetry.diversification} onClick={() => setIsDiscoveryOpen(true)} />
+
+            {/* RL chip -> the PPO policy: mode, promotion gate, results vs baselines */}
+            <RLChip apiBase={API_BASE} onClick={() => setIsRLOpen(true)} />
 
             {/* Manager chip -> what the portfolio manager is deploying, and why budget is idle */}
             <ManagerChip manager={telemetry.manager} onClick={() => setIsManagerOpen(true)} />
@@ -517,9 +529,6 @@ export default function App() {
             </button>
 
             {/* Daily PnL chip -> opens Daily Profit and Loss Calculator */}
-            {/* Income chip: profit banked today by the harvest */}
-            <IncomeChip dailyPnl={dailyPnl} onClick={() => setIsPnlCalcOpen(true)} />
-
             <DailyPnlChip dailyPnl={dailyPnl} onClick={() => setIsPnlCalcOpen(true)} />
 
             <div className="hidden 2xl:flex flex-col items-end px-3">
@@ -601,6 +610,13 @@ export default function App() {
       {isManagerOpen && (
         <Modal xl title="Agent fleet" icon={<Bot className="w-4 h-4 text-cyan-400" />} onClose={() => setIsManagerOpen(false)}>
           <ManagerPanel manager={telemetry.manager} positions={telemetry.positions} fleet={telemetry.fleet} />
+        </Modal>
+      )}
+
+      {/* RL policy modal */}
+      {isRLOpen && (
+        <Modal xl title="RL policy (PPO)" icon={<BrainCircuit className="w-4 h-4 text-cyan-400" />} onClose={() => setIsRLOpen(false)}>
+          <RLPanel apiBase={API_BASE} />
         </Modal>
       )}
 
@@ -766,7 +782,8 @@ export default function App() {
                 ['Risk / trade', `${d.risk_per_trade_pct ?? '-'}% of budget`],
                 ['Max position', `${d.max_position_notional_pct ?? '-'}%`],
                 ['Positions', `${rp.open_positions ?? 0} / ${d.max_concurrent_positions ?? '-'}`],
-                ['Daily halt', `${(rp.daily_loss_pct || 0).toFixed(2)}% / ${d.max_daily_loss_pct ?? '-'}%`],
+                ['Daily halt', `${Math.max(rp.daily_loss_pct || 0, rp.broker_day_loss_pct || 0).toFixed(2)}% / ${d.max_daily_loss_pct ?? '-'}%`],
+                ['Broker account today', `${(rp.broker_day_loss_pct || 0) > 0 ? '-' : ''}${(rp.broker_day_loss_pct || 0).toFixed(2)}% of budget`],
                 ['Entry bar', `buy_prob ≥ ${d.min_buy_prob ?? '-'}`],
                 ['At risk now', `$${(rp.total_risk_to_stops || 0).toFixed(2)} (${(rp.total_risk_pct_of_budget || 0).toFixed(2)}%)`,
                   (rp.total_risk_pct_of_budget || 0) > (d.max_daily_loss_pct || 3) ? 'text-rose-300' : 'text-emerald-300'],
@@ -811,13 +828,16 @@ export default function App() {
         {/* Left Column: Watchlist & Smart-Money Intelligence (7 Cols) */}
         <section className="lg:col-span-7 flex flex-col space-y-6">
 
+          {/* Scout: our own hourly ranking of what to watch today, and the watcher's live read */}
+          <ScoutPanel apiBase={API_BASE} />
+
           {/* Smart-money consensus: only the sources that actually answered this cycle */}
           <div className="bg-[#0f172a]/70 border border-cyan-900/40 rounded-2xl p-5 shadow-xl relative overflow-hidden">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center space-x-2">
                 <Compass className="w-5 h-5 text-cyan-400" />
                 <h2 className="font-semibold text-base text-slate-100">
-                  Smart-Money Consensus
+                  Smart money
                   <span className="ml-2 text-xs font-normal text-slate-500">
                     {(telemetry.source_health?.real_sources_available || []).join(' + ') || 'no source reachable'}
                     {Object.entries(telemetry.source_health?.sources || {})
@@ -826,68 +846,13 @@ export default function App() {
                   </span>
                 </h2>
               </div>
-              <span className="text-[10px] px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 font-mono">
-                WEIGHTED CONSENSUS
+              <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 font-mono">
+                {(telemetry.smart_money?.rows || []).filter((r) => r.verdict === 'BUY' && r.tradable).length} TRADING
               </span>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 font-mono">
-              {trendsList.map((t) => {
-                const score = t.consensus_score || 0.5;
-                const isStrongBull = t.sentiment_bias === 'STRONG_BULL';
-                const isBull = t.sentiment_bias === 'BULL';
-                const isDivergent = t.sentiment_bias === 'DIVERGENT';
-
-                return (
-                  <div key={t.symbol} className="bg-slate-900/90 border border-slate-800 rounded-xl p-3 flex flex-col justify-between">
-                    <div>
-                      <div className="flex items-center justify-between mb-1.5">
-                        <div className="flex items-center space-x-2">
-                          <span className="font-bold text-sm text-slate-100">{t.symbol}</span>
-                          <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
-                            isStrongBull ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' :
-                            isBull ? 'bg-cyan-500/20 text-cyan-400' :
-                            isDivergent ? 'bg-amber-500/20 text-amber-400' :
-                            'bg-slate-800 text-slate-400'
-                          }`}>
-                            {t.sentiment_bias}
-                          </span>
-                        </div>
-                        <span className="text-xs font-bold text-emerald-400">
-                          {(score * 100).toFixed(0)}% Score
-                        </span>
-                      </div>
-
-                      {/* Source badges */}
-                      <div className="flex flex-wrap gap-1.5 mb-2 text-[10px]">
-                        {t.signals?.sec && (
-                          <span className="px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-300 border border-blue-500/20 inline-flex items-center space-x-1" title={t.signals.sec.details}>
-                            <Building className="w-3 h-3 text-blue-400" />
-                            <span>SEC Form 4</span>
-                          </span>
-                        )}
-                        {t.signals?.etoro && (
-                          <span className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 inline-flex items-center space-x-1" title={t.signals.etoro.details}>
-                            <Users className="w-3 h-3 text-emerald-400" />
-                            <span>eToro Copy</span>
-                          </span>
-                        )}
-                        {t.signals?.stocktwits && (
-                          <span className="px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20 inline-flex items-center space-x-1" title={t.signals.stocktwits.details}>
-                            <Comment className="w-3 h-3 text-amber-400" />
-                            <span>StockTwits</span>
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    <p className="text-[10px] text-slate-400 line-clamp-2 italic font-sans">
-                      {t.thesis}
-                    </p>
-                  </div>
-                );
-              })}
-            </div>
+            <SmartMoneyPanel data={telemetry.smart_money}
+              sources={(telemetry.source_health?.real_sources_available || []).join(' + ')} />
           </div>
           
           {/* Card: Watchlist & Sub-Second Evaluation */}
@@ -898,33 +863,11 @@ export default function App() {
                 <h2 className="font-semibold text-base text-slate-100">Dynamic Watchlist & Quant Matrix</h2>
               </div>
 
-              {/* Asset Filter Tabs */}
-              <div className="flex items-center bg-slate-900 border border-slate-800 rounded-lg p-0.5 text-[11px] font-mono">
-                <button
-                  onClick={() => setAssetFilter("ALL")}
-                  className={`px-2.5 py-1 rounded-md transition-all ${assetFilter === "ALL" ? "bg-cyan-500 text-slate-950 font-bold" : "text-slate-400 hover:text-white"}`}
-                >
-                  ALL
-                </button>
-                <button
-                  onClick={() => setAssetFilter("STOCKS")}
-                  className={`px-2.5 py-1 rounded-md transition-all ${assetFilter === "STOCKS" ? "bg-cyan-500 text-slate-950 font-bold" : "text-slate-400 hover:text-white"}`}
-                >
-                  STOCKS
-                </button>
-                <button
-                  onClick={() => setAssetFilter("CRYPTO")}
-                  className={`px-2.5 py-1 rounded-md transition-all ${assetFilter === "CRYPTO" ? "bg-cyan-500 text-slate-950 font-bold" : "text-slate-400 hover:text-white"}`}
-                >
-                  CRYPTO (24/7)
-                </button>
-              </div>
-              
               {/* Add ticker form */}
               <form onSubmit={addWatchlist} className="flex items-center space-x-2">
                 <input
                   type="text"
-                  placeholder="ADD TICKER (e.g. SOL/USD)"
+                  placeholder="ADD TICKER (e.g. AMD)"
                   value={newSymbol}
                   onChange={(e) => setNewSymbol(e.target.value)}
                   className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs uppercase font-mono text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyan-500"
@@ -953,17 +896,11 @@ export default function App() {
                 </thead>
                 <tbody className="divide-y divide-slate-800/60 font-mono">
                   {(telemetry.watchlist || [])
-                    .filter((sym) => {
-                      if (assetFilter === "STOCKS") return !isCrypto(sym);
-                      if (assetFilter === "CRYPTO") return isCrypto(sym);
-                      return true;
-                    })
                     .map((sym) => {
                     const tick = telemetry.latest_prices?.[sym];
                     const quant = telemetry.quant_metrics?.[sym];
                     const sentiment = telemetry.sentiment?.[sym];
                     const isHolding = !!telemetry.positions?.[sym];
-                    const isCryptoPair = isCrypto(sym);
 
                     const posProb = sentiment?.pos_prob ?? 0.5;
                     const negProb = sentiment?.neg_prob ?? 0.5;
@@ -972,11 +909,6 @@ export default function App() {
                       <tr key={sym} className="hover:bg-slate-800/20 transition-colors">
                         <td className="py-3 font-bold text-slate-200 flex items-center space-x-1.5">
                           <span>{sym}</span>
-                          <span className={`text-[9px] px-1 rounded border font-mono ${
-                            isCryptoPair ? 'bg-purple-500/10 text-purple-300 border-purple-500/20' : 'bg-blue-500/10 text-blue-300 border-blue-500/20'
-                          }`}>
-                            {isCryptoPair ? '24/7' : 'STOCK'}
-                          </span>
                           {isHolding && (
                             <span className="text-[9px] bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-1 rounded">
                               HELD
@@ -1065,6 +997,9 @@ export default function App() {
 
         {/* Right Column: Positions, Real-time Trades & Live Logs (5 Cols) */}
         <section className="lg:col-span-5 flex flex-col space-y-6">
+
+          {/* Trade desk: observer, analyst and critic agents argue every entry before it opens */}
+          <DeskPanel desk={telemetry.desk} apiBase={API_BASE} />
           
           {/* Active Positions Card */}
           <div className="bg-[#0f172a]/70 border border-slate-800 rounded-2xl p-5 shadow-xl">
@@ -1282,7 +1217,7 @@ export default function App() {
                                 className="h-full bg-amber-400 transition-all duration-300 rounded-full shadow-[0_0_8px_rgba(251,191,36,0.5)]"
                               />
                             </div>
-                            <span className="text-[9px] text-slate-500 mt-1 font-sans">Scale-Out / Trim</span>
+                            <span className="text-[9px] text-slate-500 mt-1 font-sans">Not used (full exits only)</span>
                           </div>
 
                           {/* CLOSE Probability Bar */}
@@ -1391,25 +1326,39 @@ export default function App() {
                       <span className="font-bold text-slate-200">{tr.symbol}</span>
                       <span className="text-slate-400 text-[11px]">{tr.qty}x @ ${tr.price?.toFixed(2)}</span>
                     </div>
-                    <div className="flex items-center space-x-2 text-right text-[10px]">
-                      {tr.time && (
-                        <span className="text-slate-500 font-mono">
-                          {new Date(tr.time * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                        </span>
-                      )}
-                      {tr.pnl !== undefined ? (
-                        <span className={tr.pnl >= 0 ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
-                          PnL: {tr.pnl >= 0 ? '+' : ''}${tr.pnl.toFixed(2)}
-                        </span>
-                      ) : (
-                        <span className="text-slate-500 font-mono">{tr.mode || 'ALPACA_PAPER'}</span>
-                      )}
-                    </div>
+                    {(() => {
+                      const amount = Number(tr.qty || 0) * Number(tr.price || 0);
+                      const buy = tr.side === 'BUY';
+                      const cost = Number(tr.entry_price || 0) * Number(tr.qty || 0);
+                      const pnlPct = tr.pnl !== undefined && cost > 0 ? (tr.pnl / cost) * 100 : null;
+                      const usd = (v) => `$${Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+                      return (
+                        <div className="flex flex-col items-end text-right leading-tight shrink-0 pl-2" title={tr.exit_reason || ''}>
+                          <span className={`text-[12px] font-bold ${buy ? 'text-emerald-300' : 'text-rose-300'}`}>
+                            {usd(amount)} <span className="font-normal text-[10px] text-slate-400">{buy ? 'bought' : 'sold'}</span>
+                            {tr.partial && <span className="ml-1 text-[9px] px-1 rounded bg-amber-500/15 text-amber-300">PARTIAL</span>}
+                          </span>
+                          <span className="text-[10px] text-slate-500">
+                            {tr.time ? clockTime(tr.time) : ''}
+                            {tr.pnl !== undefined ? (
+                              <span className={`ml-1.5 font-bold ${tr.pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                {tr.pnl >= 0 ? '+' : '-'}{usd(tr.pnl)}{pnlPct !== null ? ` (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)` : ''}
+                              </span>
+                            ) : (
+                              <span className="ml-1.5">{tr.mode || 'ALPACA_PAPER'}</span>
+                            )}
+                          </span>
+                        </div>
+                      );
+                    })()}
                   </div>
                 ))
               )}
             </div>
           </div>
+
+          {/* News ingestion: every headline, its entities and events, and how it was scored */}
+          <NewsIngestPanel news={telemetry.news_log} />
 
           {/* Real-time Engine Event Logs */}
           <div className="bg-[#0f172a]/70 border border-slate-800 rounded-2xl p-4 shadow-xl">
@@ -1421,7 +1370,7 @@ export default function App() {
               {(telemetry.logs || []).slice(-20).reverse().map((log, i) => (
                 <div key={i} className="flex space-x-2 leading-relaxed items-start">
                   <span className="text-slate-600 shrink-0">
-                    {new Date(log.timestamp * 1000).toLocaleTimeString()}
+                    {clockTime(log.timestamp)}
                   </span>
                   <span className={`shrink-0 font-bold ${
                     log.level === 'ORDER_FILLED' || log.level === 'SIGNAL' ? 'text-emerald-400' :

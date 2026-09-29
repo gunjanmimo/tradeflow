@@ -42,8 +42,7 @@ logger = logging.getLogger("tradeflow.capital")
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 _PATH = os.path.join(_DATA_DIR, "capital_plan.json")
 
-# Engine order minimums (engine/allocation_agent.py, engine/risk_guard.py).
-MIN_ORDER_CRYPTO = 15.0
+# Engine order minimum (engine/risk_guard.py MIN_ORDER_DOLLARS).
 MIN_ORDER_EQUITY = 30.0
 
 
@@ -110,8 +109,7 @@ class CapitalPlan:
 def min_stage_capital(max_position_notional_pct: float) -> Dict[str, float]:
     """Smallest trading capital that can place one minimum-size order."""
     frac = max(max_position_notional_pct / 100.0, 1e-9)
-    return {"crypto": round(MIN_ORDER_CRYPTO / frac, 2),
-            "equity": round(MIN_ORDER_EQUITY / frac, 2)}
+    return {"equity": round(MIN_ORDER_EQUITY / frac, 2)}
 
 
 class CapitalPlanManager:
@@ -181,15 +179,14 @@ class CapitalPlanManager:
             raise ValueError("harvest_pct must be between 0 and 1")
         stage_capital = round(deposit * deploy_pct, 2)
         mins = min_stage_capital(state.risk_profile.max_position_notional_pct)
-        if stage_capital < mins["crypto"]:
+        if stage_capital < mins["equity"]:
             raise ValueError(
                 f"Trading capital ${stage_capital:,.2f} is too small to place any order: at risk dial "
                 f"{state.risk_profile.factor} one position is capped at "
                 f"{state.risk_profile.max_position_notional_pct:.0f}% (${stage_capital * state.risk_profile.max_position_notional_pct / 100:,.2f}), "
-                f"below the ${MIN_ORDER_CRYPTO:.0f} crypto / ${MIN_ORDER_EQUITY:.0f} stock minimum. "
-                f"Need at least ${mins['crypto']:,.2f} trading capital for crypto "
-                f"(${mins['equity']:,.2f} for stocks), i.e. a deposit of "
-                f"${mins['crypto'] / deploy_pct:,.2f} at {deploy_pct:.0%} deployed.")
+                f"below the ${MIN_ORDER_EQUITY:.0f} minimum order. "
+                f"Need at least ${mins['equity']:,.2f} trading capital, i.e. a deposit of "
+                f"${mins['equity'] / deploy_pct:,.2f} at {deploy_pct:.0%} deployed.")
         cash = float(state.account_info.get("cash", 0.0))
         if deposit > cash + 1e-6:
             raise ValueError(f"Deposit ${deposit:,.2f} exceeds available broker cash ${cash:,.2f}")
@@ -216,8 +213,6 @@ class CapitalPlanManager:
         state.sync_locked_equity(self.plan.deposit)
         self._save()
         warn = ""
-        if stage_capital < mins["equity"]:
-            warn = f" Note: below ${mins['equity']:,.2f}, stock orders cannot be placed; only crypto will trade."
         state.log_event("CAPITAL_PLAN",
             f"Stair mode ON: ${deposit:,.2f} deposit -> ${stage_capital:,.2f} trading, "
             f"${self.plan.reserve:,.2f} reserve (untouched). Stage 1 target ${self.plan.target:,.2f} "
@@ -275,22 +270,13 @@ class CapitalPlanManager:
 
         mins = min_stage_capital(state.risk_profile.max_position_notional_pct)
         was_halted = p.halted
-        p.halted = p.trading_capital < mins["crypto"]
+        p.halted = p.trading_capital < mins["equity"]
         if p.halted and not was_halted:
             state.log_event("STAIR_HALT",
-                f"Trading capital ${p.trading_capital:,.2f} is below the ${mins['crypto']:,.2f} needed to "
+                f"Trading capital ${p.trading_capital:,.2f} is below the ${mins['equity']:,.2f} needed to "
                 f"place an order. New entries stopped. Reserve ${p.reserve:,.2f} and banked income "
                 f"${p.banked_income:,.2f} are untouched; restart the ladder to continue.")
         self._apply_budget()
-        self._save()
-
-    def on_harvest(self, symbol: str, pnl: float):
-        """
-        Profit-harvest income. Deliberately NOT added to classic_realized or
-        realized_in_stage: it must neither raise the budget, compound into a
-        stage, nor offset a later loss. It stays as untraded broker cash.
-        """
-        self.plan.harvested_income = round(self.plan.harvested_income + float(pnl), 2)
         self._save()
 
     def entry_block_reason(self) -> Optional[str]:

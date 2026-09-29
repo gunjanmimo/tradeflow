@@ -4,7 +4,7 @@ Portfolio diversification: sleeve caps at entry, and daily-bar risk analysis.
 Two jobs, both driven by the risk dial (core/risk_profile.py):
 
 1. GATE. Before any entry, how many dollars may this symbol take without pushing
-   its sector, region, crypto sleeve or the cyclical share of the book past the
+   its sector, region or the cyclical share of the book past the
    dial's caps? Sizing is clamped to that headroom, and an entry with no
    headroom is refused. A symbol highly correlated with something already held
    gets half size: two 0.9-correlated positions are one position at double risk.
@@ -30,8 +30,8 @@ import numpy as np
 from core.config import settings
 from core.state import state
 from core.universe import (
-    universe, SymbolMeta, CRYPTO, DIVERSIFIED, GICS_SECTORS, COMMODITIES,
-    UNCLASSIFIED, US, EUROPE, ASIA, OTHER, GLOBAL, REGION_CRYPTO,
+    universe, SymbolMeta, DIVERSIFIED, GICS_SECTORS, COMMODITIES,
+    UNCLASSIFIED, US, EUROPE, ASIA, OTHER, GLOBAL,
 )
 from feeds.daily_bars import daily_bars
 
@@ -138,7 +138,7 @@ class DiversificationManager:
         return {
             "total": total, "by_sector": by_sector, "by_region": by_region,
             "by_theme": by_theme, "defensive": defensive,
-            "non_defensive": total - defensive, "crypto": by_sector.get(CRYPTO, 0.0),
+            "non_defensive": total - defensive,
         }
 
     # ------------------------------------------------------------------
@@ -150,7 +150,7 @@ class DiversificationManager:
             return profile.max_us_pct
         if region in (EUROPE, ASIA, OTHER):
             return profile.max_intl_region_pct
-        return None   # Crypto has its own sleeve cap; Global ETFs span regions
+        return None   # Global ETFs span regions
 
     def assess(self, symbol: str, holdings: Optional[Dict[str, float]] = None) -> Assessment:
         """Dollar headroom for a NEW position in `symbol` under the current dial."""
@@ -161,10 +161,7 @@ class DiversificationManager:
         pct = lambda p: base * p / 100.0
 
         limits: List[Tuple[str, float]] = []
-        if m.sector == CRYPTO:
-            limits.append((f"crypto sleeve cap {profile.max_crypto_pct:.0f}%",
-                           pct(profile.max_crypto_pct) - exp["crypto"]))
-        elif m.sector != DIVERSIFIED:
+        if m.sector != DIVERSIFIED:
             limits.append((f"{m.sector} sector cap {profile.max_sector_pct:.0f}%",
                            pct(profile.max_sector_pct) - exp["by_sector"].get(m.sector, 0.0)))
         region_cap = self._region_cap_pct(m.region, profile)
@@ -209,8 +206,7 @@ class DiversificationManager:
         std = base * profile.max_position_notional_pct / 100.0
         a = self.assess(symbol)
         m = a.meta
-        crypto = m.sector == CRYPTO
-        min_useful = min(std, 15.0 if crypto else 30.0) if std > 0 else 0.0
+        min_useful = min(std, 30.0) if std > 0 else 0.0
         if a.max_dollars < min_useful or a.max_dollars <= 0:
             return 0.0, [f"blocked by {a.binding}" if a.headroom_dollars < min_useful
                          else (a.notes[-1] if a.notes else "no headroom")]
@@ -220,11 +216,7 @@ class DiversificationManager:
         reasons: List[str] = []
         fit = 0.5 * min(1.0, a.max_dollars / std) if std > 0 else 0.5
 
-        if crypto:
-            if not any(universe.classify(s).sector == CRYPTO for s in held) and held:
-                fit += 0.15
-                reasons.append("first crypto exposure")
-        elif m.sector not in (DIVERSIFIED,) and not any(
+        if m.sector not in (DIVERSIFIED,) and not any(
                 universe.classify(s).sector == m.sector for s in held):
             fit += 0.15
             reasons.append(f"new sector {m.sector}")
@@ -337,24 +329,22 @@ class DiversificationManager:
         room = lambda cap, used: round(max(0.0, base * cap / 100 - used), 2)
 
         sectors = []
-        for name in list(GICS_SECTORS) + [CRYPTO, COMMODITIES, UNCLASSIFIED, DIVERSIFIED]:
+        for name in list(GICS_SECTORS) + [COMMODITIES, UNCLASSIFIED, DIVERSIFIED]:
             used = exp["by_sector"].get(name, 0.0)
             if name in (UNCLASSIFIED, COMMODITIES, DIVERSIFIED) and used <= 0:
                 continue
-            cap = (profile.max_crypto_pct if name == CRYPTO
-                   else None if name == DIVERSIFIED else profile.max_sector_pct)
+            cap = None if name == DIVERSIFIED else profile.max_sector_pct
             sectors.append({
                 "sleeve": name, "dollars": round(used, 2), "pct": pct(used), "cap_pct": cap,
                 "headroom": room(cap, used) if cap is not None else None,
                 "defensive": name in ("Health Care", "Consumer Staples", "Utilities"),
             })
         regions = []
-        for name in (US, EUROPE, ASIA, REGION_CRYPTO, GLOBAL, OTHER):
+        for name in (US, EUROPE, ASIA, GLOBAL, OTHER):
             used = exp["by_region"].get(name, 0.0)
             if name in (GLOBAL, OTHER) and used <= 0:
                 continue
-            cap = (profile.max_crypto_pct if name == REGION_CRYPTO
-                   else self._region_cap_pct(name, profile))
+            cap = self._region_cap_pct(name, profile)
             target = profile.intl_region_target_pct if name in (EUROPE, ASIA) else None
             regions.append({
                 "sleeve": name, "dollars": round(used, 2), "pct": pct(used), "cap_pct": cap,
@@ -385,7 +375,6 @@ class DiversificationManager:
             "risk_label": profile.label,
             "limits": {
                 "max_sector_pct": profile.max_sector_pct,
-                "max_crypto_pct": profile.max_crypto_pct,
                 "max_us_pct": profile.max_us_pct,
                 "max_intl_region_pct": profile.max_intl_region_pct,
                 "intl_region_target_pct": profile.intl_region_target_pct,

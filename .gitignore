@@ -32,3 +32,10 @@ api/data/
 
 # Backtest bar cache and reports (python -m backtest)
 api/backtest/output/
+
+# Historical bars for research and RL training (python -m research download)
+api/datasets/
+api/research/output/
+
+# Trained RL policies and training reports (python -m rl.train rebuilds them)
+api/models/

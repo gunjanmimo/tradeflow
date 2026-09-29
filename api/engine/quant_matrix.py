@@ -1,5 +1,6 @@
 import numpy as np
 import time
+from feeds.spreads import spreads
 from collections import deque
 from itertools import islice
 from typing import Optional, Dict, Any
@@ -77,6 +78,27 @@ class QuantMatrix:
         recent_diffs = diffs[-period:] if len(diffs) >= period else diffs
         atr = float(np.mean(recent_diffs))
         return max(atr, floor)
+
+    @staticmethod
+    def true_range_atr(h: np.ndarray, l: np.ndarray, c: np.ndarray, period: int = 14) -> Optional[float]:
+        """
+        Wilder ATR over one-minute bars from the true range (high, low and the
+        previous close), in price units. None with fewer than period + 1 bars.
+
+        The older calculate_atr averages close-to-close moves of whatever samples
+        are in the buffer; on sub-second polls that was a few cents and pinned
+        every stop to its minimum. Bars carry the real intrabar range.
+        """
+        h, l, c = (np.asarray(x, dtype=np.float64) for x in (h, l, c))
+        n = len(c)
+        if n < period + 1:
+            return None
+        prev = c[:-1]
+        tr = np.maximum(h[1:] - l[1:], np.maximum(np.abs(h[1:] - prev), np.abs(l[1:] - prev)))
+        atr = tr[:period].mean()
+        for x in tr[period:]:
+            atr = (atr * (period - 1) + x) / period
+        return float(atr)
 
     # Once the buffer holds this many samples every period is fixed (EMA 21,
     # RSI 14), so from here on each tick can update state instead of recomputing.
@@ -168,7 +190,9 @@ class QuantMatrix:
                 ema_fast=tick.price if tick else 100.0,
                 ema_slow=tick.price if tick else 100.0,
                 atr=max((tick.price if tick else 100.0) * 0.005, 1e-9),
-                spread=0.01,
+                # Not a placeholder 1%: that read as a real (too wide) spread and
+                # blocked every stock for its first minutes on the watchlist.
+                spread=spreads.estimate(symbol)[0] or 0.0,
                 volume_ratio=1.0
             )
             state.quant_metrics[symbol] = metrics
@@ -176,11 +200,21 @@ class QuantMatrix:
 
         # t1-t3: EMA 9/21, RSI 14, ATR 14
         ema_fast, ema_slow, rsi, atr = self._indicators(symbol, history, tick.price)
+        # ATR from the true range of closed one-minute bars when there are enough;
+        # the backtester computes it the same way from its bar tape.
+        from core.minute_bars import minute_bars
+        rows = minute_bars.closed_rows(symbol)[-60:]
+        if len(rows) >= 15:
+            a = np.asarray(rows, dtype=np.float64)
+            bar_atr = self.true_range_atr(a[:, 2], a[:, 3], a[:, 4])
+            if bar_atr:
+                atr = max(bar_atr, tick.price * 0.0005)
 
-        # t4: Bid-Ask Spread check
-        spread = 0.0
-        if tick.ask > 0 and tick.bid > 0:
-            spread = (tick.ask - tick.bid) / tick.price
+        # t4: Bid-Ask Spread: the real (consolidated) spread when known, else a
+        # short-window median of IEX quotes -- never one IEX snapshot, which for
+        # thinly-held names is many times the real spread (feeds/spreads.py).
+        # Unknown reads as 0: the scout only watches liquid stocks.
+        spread = spreads.estimate(symbol)[0] or 0.0
 
         # t5: Volume ratio over the last 20 volume samples (read from the deque's
         # tail only; converting the whole buffer made this O(n) too)

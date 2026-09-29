@@ -1,6 +1,6 @@
 import logging
 from typing import Dict, Any, Tuple, Optional
-from core.state import state, is_crypto_symbol, round_price, qty_decimals
+from core.state import state, round_price
 from core.config import settings
 from engine import brackets
 
@@ -9,7 +9,7 @@ logger = logging.getLogger("tradeflow.allocation")
 class LayaAllocationManager:
     """
     The Laya-driven AI Portfolio Capital Allocation Manager.
-    Decides the exact dollar amount of money to allocate to each stock or cryptocurrency
+    Decides the exact dollar amount of money to allocate to each stock
     based on Laya's conviction probability, consensus alignment, and volatility risk budgeting.
     """
     def evaluate_allocation(
@@ -89,7 +89,7 @@ class LayaAllocationManager:
         allocated_dollars = min(uncapped_dollars, notional_cap, remaining_budget)
         notional_capped = uncapped_dollars > min(notional_cap, remaining_budget) + 1e-9
 
-        # Diversification headroom: the sector/region/crypto sleeve this symbol
+        # Diversification headroom: the sector/region sleeve this symbol
         # belongs to may have less room than the single-position cap allows, and
         # a position highly correlated with a holding is halved.
         from engine.diversification import diversification
@@ -101,14 +101,9 @@ class LayaAllocationManager:
             div_note = f" [DIVERSIFICATION-CAPPED to ${div.max_dollars:,.2f}: {why}]"
 
         # 4. Cash and per-position notional caps: strictly within bot's hard cap
-        if is_crypto_symbol(symbol):
-            # Crypto on Alpaca is non-marginable and settles in USD cash.
-            # Keep a 5% cushion for fees and price drift between sizing and fill.
-            safe_cash = max(0.0, min(remaining_budget, bot_cash * 0.95))
-            min_order_value = 15.0
-        else:
-            safe_cash = max(0.0, min(remaining_budget, bot_cash - 5.0))
-            min_order_value = 30.0
+        from engine.risk_guard import MIN_ORDER_DOLLARS
+        safe_cash = max(0.0, min(remaining_budget, bot_cash - 5.0))
+        min_order_value = MIN_ORDER_DOLLARS
 
         allocated_dollars = min(allocated_dollars, safe_cash)
 
@@ -120,29 +115,14 @@ class LayaAllocationManager:
                 f"need >= ${min_order_value:,.2f}). Main broker equity is locked."
             )
 
-        # 5. Quantity at a precision appropriate to the asset's price scale.
-        # A flat 2-decimal rounding silently zeroes the quantity of any sub-cent
-        # asset (SHIB at $0.0000235 needs whole units, not hundredths).
-        if is_crypto_symbol(symbol):
-            decimals = qty_decimals(current_price)
-            qty = round(float(allocated_dollars / current_price), decimals)
-            step = 10 ** -decimals
-            # Never let rounding push the order above available cash or budget
-            while qty > 0 and (qty * current_price) > min(remaining_budget, safe_cash):
-                qty = round(qty - step, decimals)
-            if qty <= 0:
-                return self._reject(
-                    symbol, stop_loss_price, take_profit_price, conviction_tier, composite_conviction,
-                    f"Laya Manager: Computed quantity rounds to zero for {symbol} at ${current_price}."
-                )
-        else:
-            qty = int(allocated_dollars / current_price)
-            if qty < 1:
-                return self._reject(
-                    symbol, stop_loss_price, take_profit_price, conviction_tier, composite_conviction,
-                    f"Laya Manager: Cannot afford a single share of {symbol} at ${current_price:,.2f} "
-                    f"within risk budget (${allocated_dollars:,.2f} allocatable)."
-                )
+        # 5. Whole shares (bracket orders cannot be fractional).
+        qty = int(allocated_dollars / current_price)
+        if qty < 1:
+            return self._reject(
+                symbol, stop_loss_price, take_profit_price, conviction_tier, composite_conviction,
+                f"Laya Manager: Cannot afford a single share of {symbol} at ${current_price:,.2f} "
+                f"within risk budget (${allocated_dollars:,.2f} allocatable)."
+            )
 
         allocated_dollars = round(qty * current_price, 2)
         allocated_pct = round((allocated_dollars / equity) * 100, 2) if equity > 0 else 0.0

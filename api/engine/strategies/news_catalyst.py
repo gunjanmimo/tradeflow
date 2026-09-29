@@ -1,10 +1,8 @@
 """
-News-catalyst strategy -- the equity default.
+News-catalyst strategy.
 
 Equities move around discrete, datable events (earnings, guidance, verdicts,
 analyst actions) during fixed hours, and Alpaca's news feed covers them densely.
-That makes real sentiment the primary edge here, which is the opposite of the
-crypto case.
 
 Unlike the old engine, this strategy demands EVIDENCE rather than a single
 probability: several fresh headlines that mostly agree. Laya's own model card
@@ -25,7 +23,6 @@ class NewsCatalystStrategy(Strategy):
         "agreeing headlines within the freshness window, and refuses to enter "
         "against the prevailing trend. Abstains entirely when news is absent."
     )
-    applies_to = "equity"
     requires_sentiment = True
 
     params = {

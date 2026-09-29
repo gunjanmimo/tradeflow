@@ -5,6 +5,9 @@ from core.state import state
 
 logger = logging.getLogger("tradeflow.risk")
 
+# Smallest order worth placing: below this, a position is noise against costs.
+MIN_ORDER_DOLLARS = 30.0
+
 class RiskGuard:
     """
     Strict Capital and Risk Protection layer.
@@ -21,25 +24,23 @@ class RiskGuard:
         if market_block:
             return False, market_block
 
-        # 1a'. Stock session. A market order sent outside regular hours used to be
+        # 1a'. Session. A market order sent outside regular hours used to be
         # queued by the broker and filled at the open at whatever price printed.
-        from core.state import is_crypto_symbol
-        if not is_crypto_symbol(symbol):
-            from core.market_hours import us_session, REGULAR, PRE
-            session = us_session()
-            if session == PRE and not settings.PREMARKET_TRADING_ENABLED:
-                return False, "US pre-market: pre-market trading is switched off (PREMARKET_TRADING_ENABLED)."
-            if session not in (REGULAR, PRE):
-                return False, f"US stock market is {session}. Stock entries run 04:00-16:00 NY on trading days."
-            # Day trading: nothing is held through the close, so a stock opened
-            # shortly before it would only be flattened again straight away.
-            if settings.DAY_TRADE_FLATTEN_ENABLED:
-                from core.market_hours import minutes_to_close
-                mins = minutes_to_close(symbol)
-                if mins is not None and mins <= settings.NO_NEW_ENTRY_MINUTES_BEFORE_CLOSE:
-                    return False, (f"{symbol}: the US market closes in {max(mins, 0.0):.0f} min "
-                                   f"(no new day trades inside {settings.NO_NEW_ENTRY_MINUTES_BEFORE_CLOSE:.0f} min "
-                                   f"of the close).")
+        from core.market_hours import us_session, REGULAR, PRE
+        session = us_session()
+        if session == PRE and not settings.PREMARKET_TRADING_ENABLED:
+            return False, "US pre-market: pre-market trading is switched off (PREMARKET_TRADING_ENABLED)."
+        if session not in (REGULAR, PRE):
+            return False, f"US stock market is {session}. Entries run 04:00-16:00 NY on trading days."
+        # Day trading: nothing is held through the close, so a stock opened
+        # shortly before it would only be flattened again straight away.
+        if settings.DAY_TRADE_FLATTEN_ENABLED:
+            from core.market_hours import minutes_to_close
+            mins = minutes_to_close(symbol)
+            if mins is not None and mins <= settings.NO_NEW_ENTRY_MINUTES_BEFORE_CLOSE:
+                return False, (f"{symbol}: the US market closes in {max(mins, 0.0):.0f} min "
+                               f"(no new day trades inside {settings.NO_NEW_ENTRY_MINUTES_BEFORE_CLOSE:.0f} min "
+                               f"of the close).")
 
         # 1b. Portfolio circuit breakers.
         # These gate NEW ENTRIES ONLY -- exits must always remain possible, or a
@@ -53,8 +54,12 @@ class RiskGuard:
         if stair_block:
             return False, stair_block
 
-        if state.daily_loss_pct >= profile.max_daily_loss_pct:
-            reason = (f"Daily loss limit hit: -{state.daily_loss_pct:.2f}% of budget "
+        booked = state.daily_loss_pct
+        broker = state.broker_day_loss_pct if settings.RISK_BROKER_EQUITY_GUARD else 0.0
+        if max(booked, broker) >= profile.max_daily_loss_pct:
+            which = (f"broker account down {broker:.2f}% of budget today"
+                     if broker > booked else f"-{booked:.2f}% of budget booked")
+            reason = (f"Daily loss limit hit: {which} "
                       f"(limit {profile.max_daily_loss_pct}% at risk dial {profile.factor}). No new entries until tomorrow.")
             if state.halt_reason != reason:
                 state.halt_reason = reason
@@ -70,24 +75,11 @@ class RiskGuard:
                 state.log_event("RISK_HALT", reason)
             return False, reason
 
-        # 1c. Correlated-exposure cap. Five simultaneous L1 tokens is one macro bet,
-        # not five independent positions, so cap concurrent holdings per asset class.
-        from core.state import is_crypto_symbol
-        same_class = sum(
-            1 for s in state.active_positions
-            if is_crypto_symbol(s) == is_crypto_symbol(symbol)
-        )
-        if same_class >= profile.max_positions_per_asset_class:
-            klass = "crypto" if is_crypto_symbol(symbol) else "equity"
-            return False, (f"Correlated exposure cap reached: already holding {same_class} "
-                           f"{klass} positions (limit {profile.max_positions_per_asset_class} at risk dial {profile.factor}).")
-
-        # 1d. Diversification: sector / region / crypto / cyclical-share caps from
+        # 1d. Diversification: sector / region / cyclical-share caps from
         # the same dial. The class count above cannot see that NVDA and MSFT are
         # one bet; this can.
         from engine.diversification import diversification
-        div_block = diversification.entry_block_reason(
-            symbol, 15.0 if is_crypto_symbol(symbol) else 30.0)
+        div_block = diversification.entry_block_reason(symbol, MIN_ORDER_DOLLARS)
         if div_block:
             return False, div_block
 
@@ -113,7 +105,7 @@ class RiskGuard:
 
         # 4. Hard budget cap. Committed = cost basis of open positions + buys in
         # flight; the cap shrinks with realised losses. Nothing outside it is used.
-        min_order = 15.0 if is_crypto_symbol(symbol) else 30.0
+        min_order = MIN_ORDER_DOLLARS
         if state.hard_cap < min_order:
             return False, (f"Budget exhausted: realised losses have reduced the bots' capital to "
                            f"${state.bot_capital:,.2f} of the ${state.allocated_capital:,.2f} cap. "
@@ -123,7 +115,6 @@ class RiskGuard:
                            f"${state.hard_cap:,.2f} (${state.remaining_budget:,.2f} left).")
 
         # 5. Strict Cash & Budget Cap Check: bot can NEVER touch locked broker cash or funds outside budget
-        from core.state import is_crypto_symbol
         bot_cash = state.bot_cash
         min_cash_required = min_order
         if bot_cash < min_cash_required:

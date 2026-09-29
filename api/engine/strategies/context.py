@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
-from core.state import state, is_crypto_symbol
+from core.state import state
 from engine.strategies.base import StrategyContext
 from engine.strategies.indicators import PriceSeries
 
@@ -66,7 +66,6 @@ def build_context(symbol: str, price: Optional[float] = None,
         quant=quant if quant is not None else state.quant_metrics.get(symbol),
         sentiment=sentiment if sentiment is not None else state.get_sentiment(symbol),
         consensus=trend_aggregator.get_consensus(symbol),
-        is_crypto=is_crypto_symbol(symbol),
         position=position,
         highest_price=highest_price,
         series=LazySeries(symbol) if state.price_history.get(symbol) else None,

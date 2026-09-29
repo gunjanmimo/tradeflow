@@ -6,7 +6,7 @@ meet its market's close.
     left to the stop when it is already down 5% or more, and never on a clock that
     started before the position did.
   * end of day: stocks are flattened FLATTEN_MINUTES_BEFORE_CLOSE ahead of the
-    close, using the broker's close time; crypto never is; new entries stop earlier.
+    close, using the broker's close time; new entries stop earlier.
   * a forced exit that fails is retried within FORCED_EXIT_MAX_WAIT_SECONDS.
 """
 import asyncio
@@ -189,8 +189,6 @@ def test_adr_closes_with_the_us_market():
     assert mh.minutes_to_close("AZN", _ny(15, 30)) == pytest.approx(30.0)
 
 
-def test_crypto_has_no_close():
-    assert mh.minutes_to_close("BTC/USD", _ny(15, 55)) is None
 
 
 def test_no_close_outside_the_regular_session():
@@ -220,12 +218,6 @@ def test_no_new_stock_entries_near_the_close(monkeypatch):
     assert not ok and "market closes in 25 min" in why
 
 
-def test_crypto_entries_ignore_the_stock_close(monkeypatch):
-    from engine.risk_guard import risk_guard
-    monkeypatch.setattr(state, "is_trading_active", True)
-    monkeypatch.setattr(mh, "minutes_to_close", lambda *a, **k: 1.0)   # would block a stock
-    ok, why = risk_guard.can_open_position("BTC/USD")
-    assert "market closes" not in why
 
 
 # ---- retry within 50 seconds -------------------------------------------------------

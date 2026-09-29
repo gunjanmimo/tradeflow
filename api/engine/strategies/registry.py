@@ -2,36 +2,35 @@
 Strategy registry: which strategy runs on which symbol.
 
 Resolution order, most specific first:
-  1. explicit per-symbol override   (state.strategy_overrides["BTC/USD"])
-  2. asset-class default            (crypto -> momentum, equity -> stock_score)
+  1. explicit per-symbol override   (state.strategy_overrides["NVDA"])
+  2. the default                    (state.strategy_class_defaults["equity"])
 
-Defaults are asset-class-aware because the two classes offer different
-information. See engine/strategies/base.py for the reasoning; in short, equities
-have dense real news and discrete catalysts, crypto has neither but trades
-continuously.
-
-A strategy is only assignable to a class it declares support for, so a
-news-requiring strategy cannot be attached to alt-coins that have no news --
-that configuration would silently never trade.
+The platform trades US equities only, so there is one asset class. The
+"equity" key is kept so the API and dashboard keep a stable shape.
 """
 import logging
 from typing import Dict, List, Optional
 
-from core.state import is_crypto_symbol
 from engine.strategies.base import Strategy
-from engine.strategies.momentum import MomentumBreakoutStrategy
 from engine.strategies.news_catalyst import NewsCatalystStrategy
 from engine.strategies.stock_score import StockScoreStrategy
 from engine.strategies.mean_reversion import MeanReversionStrategy
 from engine.strategies.library import LIBRARY
 from engine.strategies.adaptive import AdaptiveStrategy
+from engine.strategies.rl_ppo import RLPolicyStrategy
+from engine.strategies.smart_money import SmartMoneyStrategy
+from engine.strategies.scout import ScoutStrategy
 
 logger = logging.getLogger("tradeflow.strategies")
+
+EQUITY = "equity"
 
 # Instantiated once; strategies are stateless apart from their params.
 _STRATEGIES: Dict[str, Strategy] = {
     s.name: s for s in (
-        MomentumBreakoutStrategy(),
+        RLPolicyStrategy(),
+        SmartMoneyStrategy(),
+        ScoutStrategy(),
         NewsCatalystStrategy(),
         StockScoreStrategy(),
         MeanReversionStrategy(),
@@ -40,15 +39,14 @@ _STRATEGIES: Dict[str, Strategy] = {
     )
 }
 
-# Asset-class defaults
-DEFAULT_BY_CLASS: Dict[str, str] = {
-    "crypto": "momentum_breakout",
-    "equity": "stock_score",
-}
+# News sentiment (Jev, with Laya as fallback) trades by default. The PPO policy
+# runs in shadow mode beside it (settings.RL_MODE): it decides and logs every
+# bar and retrains after each close, but places no orders.
+DEFAULT_BY_CLASS: Dict[str, str] = {EQUITY: "news_catalyst"}
 
 
 def asset_class(symbol: str) -> str:
-    return "crypto" if is_crypto_symbol(symbol) else "equity"
+    return EQUITY
 
 
 def available() -> List[Strategy]:
@@ -59,35 +57,49 @@ def get(name: str) -> Optional[Strategy]:
     return _STRATEGIES.get(name)
 
 
-def is_compatible(name: str, klass: str) -> bool:
-    strat = _STRATEGIES.get(name)
-    if strat is None:
-        return False
-    return strat.applies_to in ("any", klass)
+def is_compatible(name: str, klass: str = EQUITY) -> bool:
+    return klass == EQUITY and name in _STRATEGIES
 
 
 def resolve(symbol: str, class_defaults: Dict[str, str],
             overrides: Dict[str, str]) -> Strategy:
     """
-    Returns the strategy for this symbol. Falls back to the asset-class default,
-    and finally to momentum (which needs no external data and so can always run).
+    The override for this symbol; else smart_money for a tradable smart-money
+    BUY (settings.SMART_MONEY_TRADING); else scout for a scout pick
+    (settings.SCOUT_ENABLED); else the configured default.
     """
     name = overrides.get(symbol)
     if name and name in _STRATEGIES:
         return _STRATEGIES[name]
-
-    klass = asset_class(symbol)
-    name = class_defaults.get(klass) or DEFAULT_BY_CLASS.get(klass)
+    if _is_smart_money_buy(symbol):
+        return _STRATEGIES["smart_money"]
+    if _is_scout_pick(symbol):
+        return _STRATEGIES["scout"]
+    name = class_defaults.get(EQUITY) or DEFAULT_BY_CLASS[EQUITY]
     strat = _STRATEGIES.get(name)
-    if strat and is_compatible(strat.name, klass):
-        return strat
+    if strat is None:
+        logger.warning("Unknown default strategy %s; falling back to %s", name, DEFAULT_BY_CLASS[EQUITY])
+        strat = _STRATEGIES[DEFAULT_BY_CLASS[EQUITY]]
+    return strat
 
-    if strat and not is_compatible(strat.name, klass):
-        logger.warning(
-            "Strategy %s is not valid for %s assets; falling back to momentum_breakout",
-            name, klass,
-        )
-    return _STRATEGIES["momentum_breakout"]
+
+def _is_smart_money_buy(symbol: str) -> bool:
+    from core.config import settings
+    if not settings.SMART_MONEY_TRADING:
+        return False
+    try:
+        from engine.smart_money import smart_money
+        return smart_money.verdict(symbol)["verdict"] == "BUY" and smart_money.tradable(symbol) is None
+    except Exception:
+        return False
+
+
+def _is_scout_pick(symbol: str) -> bool:
+    from core.config import settings
+    if not settings.SCOUT_ENABLED:
+        return False
+    from scout.service import scout
+    return scout.is_pick(symbol)
 
 
 def for_position(symbol: str, position: Optional[Dict], class_defaults: Dict[str, str],
@@ -95,7 +107,7 @@ def for_position(symbol: str, position: Optional[Dict], class_defaults: Dict[str
     """
     The strategy that manages an OPEN position's exits: the one that opened it.
 
-    Resolving fresh each tick meant changing a class default (or the adaptive
+    Resolving fresh each tick meant changing the default (or the adaptive
     selector changing its pick) silently swapped a live trade's exit rules.
     Falls back to normal resolution for positions with no recorded entry
     strategy, such as ones opened before this process started.
@@ -110,8 +122,5 @@ def describe_all() -> Dict:
     return {
         "strategies": [s.describe() for s in _STRATEGIES.values()],
         "class_defaults": dict(DEFAULT_BY_CLASS),
-        "compatibility": {
-            s.name: [k for k in ("crypto", "equity") if is_compatible(s.name, k)]
-            for s in _STRATEGIES.values()
-        },
+        "compatibility": {s.name: [EQUITY] for s in _STRATEGIES.values()},
     }

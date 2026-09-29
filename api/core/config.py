@@ -19,9 +19,8 @@ class Settings(BaseSettings):
     STOP_LOSS_ATR_MULTIPLE: float = 1.5   # Stop loss at 1.5 * ATR
     TAKE_PROFIT_ATR_MULTIPLE: float = 3.0 # Take profit at 3.0 * ATR (1:2 Risk/Reward)
 
-    # Stop-distance bounds, as a fraction of price. Both are relative, never absolute
-    # dollar amounts -- an absolute floor is meaningless across assets priced from
-    # $0.00002 (SHIB) to $85,000 (BTC).
+    # Stop-distance bounds, as a fraction of price. Relative, never absolute dollar
+    # amounts, so a $5 stock and a $900 stock get comparable stops.
     MIN_STOP_DISTANCE_PCT: float = 0.008  # never risk a stop tighter than 0.8%
     MAX_STOP_DISTANCE_PCT: float = 0.06   # never accept a stop wider than 6%
     MAX_POSITION_NOTIONAL_PCT: float = 0.15  # max 15% of budget in one position
@@ -31,8 +30,12 @@ class Settings(BaseSettings):
 
     # Portfolio-level circuit breakers (evaluated before every new entry)
     MAX_DAILY_LOSS_PERCENT: float = 3.0   # halt new entries after -3% on the day
+    # Also measure the day's loss on the broker account itself (equity vs. the
+    # previous close, relative to the bots' budget). Booked P&L missed fees and
+    # slippage and under-reported a 13% account loss as 1.6%; this cannot.
+    # Turn off only if the account is also traded by hand.
+    RISK_BROKER_EQUITY_GUARD: bool = True
     MAX_DRAWDOWN_PERCENT: float = 10.0    # halt new entries after -10% from peak equity
-    MAX_POSITIONS_PER_ASSET_CLASS: int = 3  # cap correlated exposure (e.g. 5 L1 tokens)
 
     # Signal freshness: a sentiment score older than this is not tradeable.
     # Without a TTL a score from hours ago is read as current on every tick.
@@ -103,14 +106,11 @@ class Settings(BaseSettings):
     MEMORY_ENABLED: bool = True
 
     # --- Quant council (engine/strategies/council.py) ---
-    # Manager: refuse a new entry when regime-suited strategies clearly oppose it.
-    COUNCIL_ENTRY_CHECK: bool = True
-    # Trade bots: exit a held position when the council turns decisively bearish.
-    COUNCIL_EXIT_CHECK: bool = True
+    # Information only: the council's verdict is shown on the dashboard but no
+    # longer vetoes entries or closes positions (it never showed an edge).
     COUNCIL_MIN_VOTERS: int = 3
     COUNCIL_SUPPORT_CONSENSUS: float = 0.20
-    COUNCIL_VETO_CONSENSUS: float = -0.25   # entry refused at or below this
-    COUNCIL_EXIT_CONSENSUS: float = -0.50   # held position closed at or below this
+    COUNCIL_VETO_CONSENSUS: float = -0.25   # verdict "oppose" at or below this
 
     # --- Off-process analysis worker (engine/analysis) ---
     # Everything heavier than a dict lookup runs in a separate process on this
@@ -121,9 +121,7 @@ class Settings(BaseSettings):
     ANALYSIS_MAX_AGE_SECONDS: float = 10.0
     # Adaptive strategy: how many worker-ranked candidates to evaluate per tick.
     ADAPTIVE_TOP_K: int = 3
-    # Monte Carlo: minimum P(take-profit before stop) to allow an entry.
-    # 0 disables the gate (the probability is still computed and shown).
-    MC_MIN_TP_FIRST_PROB: float = 0.0
+    # Monte Carlo P(take-profit before stop), shown on the dashboard.
     MC_PATHS: int = 1000
 
     # --- Discovery & diversification (engine/discovery.py, engine/diversification.py) ---
@@ -144,7 +142,9 @@ class Settings(BaseSettings):
     # Auto-selection: each cycle the best-scoring stocks are put on the watchlist
     # (and auto-picked ones that fall well out of the ranking are taken off, unless
     # held). Entries still pass the strategy, risk guard and diversification gates.
-    DISCOVERY_AUTO_PROMOTE: bool = True
+    # Off while the scout (scout/) picks the watchlist: two rankers adding and
+    # dropping symbols would fight. The pool still scores for manual picks.
+    DISCOVERY_AUTO_PROMOTE: bool = False
     DISCOVERY_AUTO_TOP_N: int = 10
     DISCOVERY_AUTO_MIN_SCORE: float = 0.55
     # Extra auto-pick slots for stocks the smart-money sources are clearly bullish
@@ -160,13 +160,14 @@ class Settings(BaseSettings):
     STOCK_SCORE_MIN_ENTRY: float = 0.62
     STOCK_SCORE_EXIT_BELOW: float = 0.40
     # No discretionary (score/news) exit before this; stops and targets still apply.
-    # Stops the enter-and-flip churn that cost the crypto bots today.
     STOCK_SCORE_MIN_HOLD_MINUTES: float = 30.0
 
     # --- US pre-market (04:00-09:30 NY) ---
     # Alpaca accepts only DAY limit orders flagged extended_hours then, and no
     # brackets: stop and target are enforced by the position's sentinel instead.
-    PREMARKET_TRADING_ENABLED: bool = True
+    # Off by default: every backtest and the RL policy's training data are
+    # regular-session bars, so a pre-market entry is outside anything tested.
+    PREMARKET_TRADING_ENABLED: bool = False
     PREMARKET_MAX_SPREAD_PCT: float = 1.0      # refuse entries on wider quotes
     PREMARKET_LIMIT_OFFSET_PCT: float = 0.10   # buy limit this far above the ask
     PREMARKET_EXIT_OFFSET_PCT: float = 0.50    # sell limit this far below the bid
@@ -201,14 +202,31 @@ class Settings(BaseSettings):
     # and the stop / other exits keep ownership.
     STALE_PRICE_EXIT_SECONDS: float = 120.0
     STALE_PRICE_MAX_LOSS_PCT: float = 5.0
+    # A position worth less than this is a leftover (the engine buys whole shares
+    # and never smaller than engine/risk_guard.MIN_ORDER_DOLLARS): close it.
+    DUST_POSITION_USD: float = 30.0
     # A forced exit never sits waiting longer than this: a failed close is retried
     # within it, whatever the normal backoff would have been.
     FORCED_EXIT_MAX_WAIT_SECONDS: float = 50.0
 
+    # --- Profit-taking (engine/profit_manager.py), in R = entry - initial stop ---
+    # At +SCALE_OUT_AT_R sell SCALE_OUT_FRACTION and move the stop to breakeven;
+    # then trail the stop TRAIL_DISTANCE_R behind the high. The target still
+    # closes the rest. Stops are also held at the broker (an OCO stop + target
+    # for the shares held), re-placed at most every BROKER_STOP_UPDATE_SECONDS.
+    PROFIT_TAKING_ENABLED: bool = True
+    SCALE_OUT_AT_R: float = 1.0
+    SCALE_OUT_FRACTION: float = 0.5
+    BREAKEVEN_BUFFER_PCT: float = 0.05
+    TRAIL_DISTANCE_R: float = 1.0
+    STOP_MIN_STEP_R: float = 0.1
+    BROKER_STOP_UPDATE_SECONDS: float = 30.0
+    BROKER_PROTECTION_CHECK_SECONDS: float = 60.0
+
     # --- Day trading: nothing is held through the close ---
     # Stocks are flattened this long before their market closes (the broker clock's
     # own close time, so half-days are respected) and get no new entries inside
-    # NO_NEW_ENTRY_MINUTES_BEFORE_CLOSE. Crypto has no close and is exempt.
+    # NO_NEW_ENTRY_MINUTES_BEFORE_CLOSE.
     DAY_TRADE_FLATTEN_ENABLED: bool = True
     FLATTEN_MINUTES_BEFORE_CLOSE: float = 10.0
     NO_NEW_ENTRY_MINUTES_BEFORE_CLOSE: float = 30.0
@@ -227,82 +245,149 @@ class Settings(BaseSettings):
     MANAGER_FIT_WEIGHT: float = 0.5
 
     # --- Trend analyst (engine/trend.py, core/minute_bars.py) ---
-    # Nothing is bought until a symbol has TREND_MIN_BARS one-minute bars behind
-    # it (backfilled from Alpaca, so normally at once) and its trend reads up.
+    # Reads each symbol's trend for the dashboard. It no longer gates entries:
+    # the strategy that decides an entry owns all of its conditions, so what the
+    # backtester and the RL environment replay is exactly what trades.
     MINUTE_BARS_BACKFILL: bool = True
     TREND_INTERVAL_SECONDS: float = 1.0
     TREND_MIN_BARS: int = 20
     TREND_SHORT_BARS: int = 15
     TREND_LONG_BARS: int = 60
     TREND_UP: float = 0.30              # |direction| at which the label becomes up/down
-    TREND_ENTRY_MIN: float = 0.25       # new entries need at least this direction
 
-    # --- Position manager: trend-driven BUY more / SELL part / HOLD / CLOSE ---
-    # Tick-level stop, target, stale-price and end-of-day exits stay with each
-    # position's sentinel; this agent acts on the trend, every few seconds.
-    POSITION_MANAGER_ENABLED: bool = True
-    POSITION_MANAGER_INTERVAL_SECONDS: float = 2.0
-    TREND_EXIT_DIRECTION: float = 0.45  # close when direction <= -this (confident)
-    TREND_TRIM_DIRECTION: float = 0.25  # trim a winner when direction <= -this, or on a reversal
-    TRIM_FRACTION: float = 0.5
+    # --- RL policy (rl/, engine/strategies/rl_ppo.py) ---
+    # auto    trades (paper) only when the deployed policy passed its promotion
+    #         gate on unseen days; otherwise runs in shadow mode
+    # shadow  decides and logs every decision, never places an order (default:
+    #         news sentiment trades while the policy keeps learning)
+    # live    trades whatever policy is deployed, gate or not (use with care)
+    # off     not consulted
+    RL_MODE: str = Field(default=os.getenv("RL_MODE", "shadow"))
+    # Streamed and backfilled for market context (the policy reads SPY), never traded
+    # unless also on the watchlist.
+    CONTEXT_SYMBOLS: tuple = ("SPY",)
+    RL_GATE_MIN_T: float = 2.0          # test-set t-stat a policy needs to be approved
+    # Learner agent: after each close, retrain on the newest data (warm start)
+    # and deploy the result only if it beats the current policy on the same days.
+    RL_RETRAIN_ENABLED: bool = True
+    RL_RETRAIN_AFTER_CLOSE_MINUTES: float = 30.0
+    RL_RETRAIN_ITERATIONS: int = 120
 
-    # Profit harvest: whenever an open position shows ANY profit at the bid (the
-    # price a sell fills at), sell PROFIT_HARVEST_FRACTION of it and book the gain
-    # as day income. Income is ring-fenced: never traded again, never cushions a
-    # loss. The remainder is harvested again only on new profit (a bid above the
-    # last harvest). PROFIT_HARVEST_USD > 0 sets a minimum; 0 = any profit.
-    # Never fires on a loss. A position too small to split is held whole.
-    PROFIT_HARVEST_ENABLED: bool = True
-    PROFIT_HARVEST_USD: float = 0.0
-    PROFIT_HARVEST_FRACTION: float = 0.5
-    # A harvest must bank at least this much (net of fees): no $0.00 sells.
-    PROFIT_HARVEST_MIN_INCOME: float = 0.01
-    PROFIT_HARVEST_RETRY_SECONDS: float = 10.0  # e.g. a stock outside regular hours
-    # Stocks: harvest in fractional shares where Alpaca allows it (a 1-share
-    # winner sells 0.5), down to this many decimals and at least this notional.
-    HARVEST_FRACTION_DECIMALS: int = 4
-    HARVEST_MIN_FRACTIONAL_NOTIONAL: float = 1.0
-    # Crypto: Alpaca's taker fee, paid on the buy and on the harvest sell. A
-    # crypto harvest needs the profit to clear both, or it books a loss as income.
-    CRYPTO_TAKER_FEE_BPS: float = 25.0
-    SCALE_IN_ENABLED: bool = True
-    SCALE_IN_DIRECTION: float = 0.50    # add to a winner only in a strong, confident uptrend
-    SCALE_IN_MIN_R: float = 1.0         # ...already up at least 1x its initial risk
-    SCALE_IN_FRACTION: float = 0.5      # add this share of the original investment, once
+    # --- Smart money (engine/smart_money.py, engine/strategies/smart_money.py) ---
+    # Tradable BUYs (sizeable insider purchases, broad top-investor ownership;
+    # liquid US stocks only) are put on the watchlist and day-traded by the
+    # smart_money strategy. Everything else stays with the default strategy.
+    SMART_MONEY_TRADING: bool = True
+    SMART_MONEY_LOOKBACK_DAYS: float = 5.0         # an insider purchase counts this long
+    SMART_MONEY_MIN_BUY_USD: float = 100_000.0     # smaller purchases are noise
+    SMART_MONEY_MIN_BREADTH: float = 0.20          # share of the top eToro investors holding it
+    SMART_MONEY_MIN_PRICE: float = 5.0
+    SMART_MONEY_MIN_DOLLAR_VOLUME: float = 10_000_000.0   # average daily $ traded
+    SMART_MONEY_FIRST_ENTRY_MINUTES: float = 30.0  # no entries in the first half hour
 
-    # --- Loss recovery (engine/loss_recovery.py) ---
-    # A losing position is not dumped on one print through its stop or on a
-    # headline alone. The stop has to hold for STOP_CONFIRM_SECONDS, or the price
-    # has to fall STOP_DISASTER_EXTRA_R x the stop distance further (the broker's
-    # bracket leg sits there). Bearish news closes a loser only when the trend
-    # agrees. A stalled loser gets one rescue add that never moves the stop and
-    # caps the loss at RECOVERY_MAX_RISK_MULT x the original risk, and once it is
-    # back above break-even its stop is locked there.
-    STOP_CONFIRM_ENABLED: bool = True
-    STOP_CONFIRM_SECONDS: float = 20.0
-    STOP_DISASTER_EXTRA_R: float = 0.5
-    RECOVERY_ENABLED: bool = True
-    RECOVERY_ADD_ENABLED: bool = True
-    # Off for crypto: the 2026-09 backtest (python -m backtest) showed rescue adds
-    # losing ~$4.5k over a week on crypto, as each add pays the taker fee again
-    # and doubles into the losers. On stocks it was neutral.
-    RECOVERY_ADD_CRYPTO: bool = False
-    RECOVERY_ADD_MIN_R: float = 0.4       # rescue only once down at least this x the stop distance
-    RECOVERY_ADD_MAX_R: float = 0.8       # ...and not this close to the stop
-    RECOVERY_ADD_FRACTION: float = 0.5    # add at most this share of the current quantity
-    RECOVERY_MAX_RISK_MULT: float = 1.25  # loss at the stop after the add <= this x original risk
-    RECOVERY_MIN_MICRO: float = 0.0       # micro trend must be at least flat: the fall has stalled
-    RECOVERY_RETRY_SECONDS: float = 30.0
-    RECOVERY_BREAKEVEN_BUFFER_PCT: float = 0.10  # lock the stop this far above break-even (fees, spread)
+    # --- Scout: our own stock discovery (scout/) ---
+    # Every SCOUT_INTERVAL_SECONDS it ranks the stocks worth watching today from
+    # past-window performance, today's move, news and public discussion (Reddit,
+    # StockTwits), and puts the top SCOUT_TOP_N on the watchlist.
+    SCOUT_ENABLED: bool = True
+    SCOUT_INTERVAL_SECONDS: float = 3600.0
+    SCOUT_TOP_N: int = 10
+    # A pick stays on the watchlist until it falls out of the top
+    # SCOUT_KEEP_RANK, so ranks shuffling by a place cause no churn.
+    SCOUT_KEEP_RANK: int = 20
+    SCOUT_MIN_SCORE: float = 0.55
+    # Eligibility: a real, liquid US common stock with enough history to judge.
+    SCOUT_MIN_PRICE: float = 5.0
+    SCOUT_MIN_DOLLAR_VOLUME: float = 20_000_000.0
+    SCOUT_MAX_POOL: int = 500
+    # The world's exchanges (scout/exchanges.py): each hour, the SCOUT_EXCHANGE_TOP
+    # most-traded stocks of every market listed here ("tradingview market:label"),
+    # mapped by company name to a US line Alpaca can trade (an ADR or a US
+    # listing). Hot stocks with no such line are shown but cannot be traded.
+    SCOUT_EXCHANGES: str = ("uk:London,germany:Xetra,france:Paris,netherlands:Amsterdam,switzerland:Zurich,"
+                            "hongkong:Hong Kong,india:India NSE,japan:Tokyo,korea:Korea,taiwan:Taiwan")
+    SCOUT_EXCHANGE_TOP: int = 40
+    # Picks reserved per exchange on top of SCOUT_TOP_N (its best tradable stock),
+    # at most SCOUT_INTL_MAX_PICKS in all: foreign stocks get little US news and
+    # Reddit attention and would otherwise rarely make the overall top.
+    SCOUT_EXCHANGE_SLOTS: int = 1
+    SCOUT_INTL_MAX_PICKS: int = 6
+    SCOUT_EXCHANGE_MIN_SCORE: float = 0.45
+    SCOUT_NEWS_LOOKBACK_HOURS: float = 24.0
+    SCOUT_NEWS_MAX_ITEMS: int = 1000
+    # Headline tone is scored (Jev/Laya) for this many of the best candidates,
+    # at most SCOUT_TONE_HEADLINES of each one's newest headlines.
+    SCOUT_TONE_TOP_N: int = 30
+    SCOUT_TONE_HEADLINES: int = 3
+    SCOUT_REDDIT_PAGES: int = 2
+
+    # --- Watcher: keeps eyes on the scout's picks, decides when to trade ---
+    # Confidence (0..1) from the pick's scout score, the intraday trend, VWAP,
+    # the move since the open, fresh news and the market. An entry needs it at
+    # or above SCOUT_ENTRY_CONFIDENCE without a break for SCOUT_CONFIRM_SECONDS.
+    SCOUT_TRADING: bool = True
+    SCOUT_WATCH_INTERVAL_SECONDS: float = 5.0
+    SCOUT_ENTRY_CONFIDENCE: float = 0.65
+    SCOUT_CONFIRM_SECONDS: float = 90.0
+    SCOUT_EXIT_CONFIDENCE: float = 0.40
+    SCOUT_MIN_HOLD_MINUTES: float = 15.0
+    SCOUT_FIRST_ENTRY_MINUTES: float = 15.0      # no entries in the opening auction noise
+    SCOUT_MAX_ENTRIES_PER_DAY: int = 1           # per symbol
+
+    # --- Trade desk: every entry is observed, then argued by LLM agents (desk/) ---
+    # Observer   watches the stock for DESK_OBSERVE_SECONDS after the signal; the
+    #            signal must stay present for DESK_MIN_PERSISTENCE of the checks
+    # Analyst    DESK_ANALYST_MODEL with reasoning: thesis and P(target before stop)
+    # Critic     DESK_CRITIC_MODEL: argues against the trade, may veto
+    # Decision   both agree and their mean probability clears the breakeven of the
+    #            trade's own stop/target by a margin set by the risk dial (and DESK_MIN_PROB)
+    # The executor refuses any buy without a fresh approval (DESK_REQUIRED), so an
+    # unreachable Ollama blocks entries rather than letting them through unreviewed.
+    DESK_ENABLED: bool = True
+    DESK_REQUIRED: bool = True
+    DESK_REVIEW_WHEN_PAUSED: bool = False
+    OLLAMA_URL: str = Field(default=os.getenv("OLLAMA_URL", "http://localhost:11434"))
+    # Two different models, so the critic is a second opinion and not the same
+    # model agreeing with itself. On the 8 GB GPU they cannot both sit in VRAM:
+    # swapping them costs 1.5-3 minutes a review, so the analyst stays wholly on
+    # the GPU and the critic takes the VRAM left over, the rest of its layers in
+    # RAM (DESK_CRITIC_NUM_GPU layers on the GPU; -1 lets Ollama decide).
+    DESK_ANALYST_MODEL: str = "qwen3.5:9b"
+    DESK_ANALYST_THINK: bool = True
+    DESK_ANALYST_NUM_GPU: int = -1
+    DESK_CRITIC_MODEL: str = "qwen3:4b"
+    DESK_CRITIC_THINK: bool = False
+    DESK_CRITIC_NUM_GPU: int = 12
+    DESK_LLM_TIMEOUT_SECONDS: float = 150.0
+    DESK_LLM_MAX_TOKENS: int = 3500
+    # Reasoning budget (~35 tokens/s on an RTX 3070): past it the model is handed
+    # its notes and asked to answer, so a review cannot run for minutes.
+    DESK_THINK_BUDGET_TOKENS: int = 1000
+    DESK_OBSERVE_SECONDS: float = 90.0
+    DESK_MIN_PERSISTENCE: float = 0.7
+    DESK_SIGNAL_GAP_SECONDS: float = 20.0      # signal missing this long while observed: faded
+    # The bar is the trade's own breakeven (from its stop and target distances)
+    # plus the risk dial's margin (below), never below DESK_MIN_PROB.
+    DESK_MIN_PROB: float = 0.40
+    # Margin over breakeven, by the risk dial: DESK_EDGE_MARGIN_CAUTIOUS at dial 1
+    # down to DESK_EDGE_MARGIN_AGGRESSIVE at dial 10 (linear). A cautious user
+    # needs a clearer edge before the desk approves.
+    DESK_EDGE_MARGIN_CAUTIOUS: float = 0.08
+    DESK_EDGE_MARGIN_AGGRESSIVE: float = 0.02
+    # Context window per call: the case file, the reasoning and the answer must
+    # fit, or Ollama silently drops the start of the prompt (its default is 4096).
+    DESK_NUM_CTX: int = 8192
+    DESK_CLEARANCE_SECONDS: float = 180.0      # an approval is good this long
+    DESK_MAX_PRICE_DRIFT_PCT: float = 0.5      # ...and while price stays this close
+    DESK_REJECT_COOLDOWN_SECONDS: float = 900.0
+    DESK_MAX_ACTIVE_CASES: int = 4
 
     # --- Curator: moves discovery's best picks onto the watchlist ---
     CURATOR_INTERVAL_SECONDS: float = 30.0
 
-    # --- Unfilled orders ---
-    # A crypto market order still open after this long is treated as unfillable,
-    # cancelled (engine-placed orders only) and the symbol put on cooldown.
-    STALE_ORDER_SECONDS: float = 60.0
-    UNFILLED_COOLDOWN_SECONDS: float = 3600.0
+    # Times shown to the operator (dashboard, logs, scheduler labels). Market
+    # logic never uses it: US sessions are always computed in New York time.
+    DISPLAY_TIMEZONE: str = Field(default=os.getenv("DISPLAY_TIMEZONE", "Europe/Paris"))
 
     # Server Settings
     HOST: str = "0.0.0.0"
