@@ -1,4 +1,26 @@
-# TradeFlow: a US-stock research and paper-trading platform with a PPO agent
+<div align="center">
+
+# 📈 TradeFlow
+
+**An open-source AI trading lab for US stocks.**
+It finds its own stocks, has local LLM agents argue every trade before it opens, protects every position at the broker, and measures honestly whether any of it has an edge.
+
+[![Release](https://img.shields.io/github/v/release/gunjanmimo/tradeflow?label=release&color=2ea44f)](https://github.com/gunjanmimo/tradeflow/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)](api/requirements.txt)
+[![FastAPI](https://img.shields.io/badge/FastAPI-backend-009688?logo=fastapi&logoColor=white)](api/main.py)
+[![React + Vite](https://img.shields.io/badge/React%20%2B%20Vite-dashboard-61DAFB?logo=react&logoColor=black)](app/)
+[![Alpaca paper](https://img.shields.io/badge/Alpaca-paper%20trading-FCD535)](https://alpaca.markets)
+[![Local LLMs](https://img.shields.io/badge/LLMs-local%20via%20Ollama-000000?logo=ollama&logoColor=white)](https://ollama.com)
+[![Tests](https://img.shields.io/badge/tests-210%20passing-2ea44f)](api/tests/)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-ff69b4.svg)](#-contributing)
+[![GitHub stars](https://img.shields.io/github/stars/gunjanmimo/tradeflow?style=social)](https://github.com/gunjanmimo/tradeflow/stargazers)
+
+[Features](#-features) · [How a trade happens](#-how-a-trade-happens) · [Results](#-honest-results) · [Quick start](#-quick-start) · [Docs](#-documentation) · [Roadmap](#-roadmap) · [Contributing](#-contributing)
+
+**⭐ If you find TradeFlow useful or interesting, please [star the repo](https://github.com/gunjanmimo/tradeflow/stargazers). It helps others find it and keeps the project going.**
+
+</div>
 
 > [!CAUTION]
 > **Use at your own risk.** TradeFlow is a personal side project, **not a battle-tested trading tool**. It can place real orders, and automated trading can lose money quickly.
@@ -7,20 +29,114 @@
 >
 > Start with **paper trading** (the default), read the code before trusting it, and never trade money you cannot afford to lose. The software is provided "as is", without warranty of any kind (see [LICENSE](LICENSE)).
 
-TradeFlow day-trades **US equities** on Alpaca. By default **news sentiment trades**: headlines scored by Jev (TypeSafe), with Laya as fallback, drive the `news_catalyst` strategy, which enters on several fresh, agreeing, bullish headlines confirmed by the price trend.
+## 💡 Why TradeFlow
 
-Beside it, a reinforcement-learning agent (PPO) runs in **shadow mode**. Every five minutes it decides whether each watched stock should be held or flat and logs that decision. It retrains after each close, and never places an order. It trains on one-minute bars under the same fills, stops, costs and session rules that live trading uses. It may only trade (`RL_MODE=auto`) once it has made money, with statistical significance, on days it never trained on.
-
-The platform is built around one question: **does this have an edge after costs?** Every idea goes through the same pipeline before it can trade:
+Most trading bots show a backtest and ask for trust. TradeFlow is built around one question instead: **does this have an edge after costs?** Every idea has to earn its way to real trades:
 
 ```
 research/  event study of a signal ──►  backtest/  replay of the live rules ──►  rl/  PPO + walk-forward gate ──►  paper (auto)
            gross edge vs 6 bps cost                 gross vs cost per trade             beats flat, holding, random
 ```
 
----
+Everything it decides is logged: every ranking, every desk case, every trade and its outcome. The results are published as they are, losses included.
 
-## 📉 What the data says (read this first)
+## ✨ Features
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+### 🔭 Its own stock discovery
+Every hour it ranks the stocks worth watching. It combines past performance, today's move, news, Reddit and StockTwits discussion, and **what 10 world exchanges are trading** (London, Xetra, Paris, Amsterdam, Zurich, Hong Kong, NSE, Tokyo, Korea, Taiwan), mapped to US-tradable lines. No hard-coded stock lists.
+
+</td>
+<td width="50%" valign="top">
+
+### 🧑‍⚖️ An LLM trade desk
+No buy goes out without approval. An **Observer** watches the signal, an **Analyst** (`qwen3.5:9b`, with reasoning) and a **Critic** (`qwen3:4b`) argue it from a case file that includes *your* risk dial, and the **Decision** compares their odds with the trade's breakeven. Everything runs locally and streams live to the dashboard.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### 💰 Profit-taking and protected positions
+It sells half at **+1R**, moves the stop to breakeven, then trails the rest. Every position keeps a real stop **at the broker** (a bracket or an OCO), so a restart or a crash never leaves it unguarded.
+
+</td>
+<td valign="top">
+
+### 🔬 A research harness that is hard to fool
+Event studies with day-clustered t-stats, a chronological holdout and costs, plus a backtester that replays the live rules bar by bar.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### 🤖 A PPO agent that has to earn its trades
+A reinforcement-learning policy learns from one-minute bars under the live rules and retrains after each close. It stays in **shadow mode** until it beats flat, holding and random trading on days it never saw.
+
+</td>
+<td valign="top">
+
+### 🎚️ One risk dial and diversification
+A 1–10 dial sets position size, stops, daily-loss and drawdown halts, sector and region caps, and how cautious the trade desk is. It is saved, and survives restarts.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### 📊 A live dashboard
+Today's watch sorted live by confidence, the world-exchange boards, the trade desk thinking in real time, news with named entities, positions with their probabilities, and fills with P&L. All over a 4 Hz websocket, with times in your timezone.
+
+</td>
+<td valign="top">
+
+### 🪜 Capital modes and P&L tools
+A classic fixed budget, or a **stair** mode that banks part of each step's profit. A daily P&L calculator and an expectancy simulator.
+
+</td>
+</tr>
+</table>
+
+## 🧭 How a trade happens
+
+```mermaid
+flowchart LR
+    subgraph Sources["Sources, every hour"]
+        A1["Alpaca: most active,<br/>gainers, news"]
+        A2["Reddit / StockTwits"]
+        A3["10 world exchanges<br/>→ US-listed ADRs"]
+    end
+    Sources --> S["🔭 Scout<br/>ranks the stocks worth watching"]
+    S --> W["👀 Watcher<br/>live confidence every 5 s"]
+    W --> PM["📋 Portfolio manager<br/>ranks entries, sizes them"]
+    PM --> D
+    subgraph D["🧑‍⚖️ Trade desk"]
+        O["Observer · 90 s"] --> AN["Analyst · qwen3.5:9b"] --> CR["Critic · qwen3:4b"] --> DE["Decision<br/>odds vs breakeven + dial margin"]
+    end
+    D -->|approved| R["🛡️ Risk guard"]
+    R --> E["⚡ Executor<br/>bracket order at the broker"]
+    E --> P["📍 Position"]
+    P --> SN["Sentinel: stop · target ·<br/>strategy exit · end of day"]
+    P --> PF["Profit manager: sell ½ at +1R,<br/>breakeven, trail"]
+    SN --> F["🧾 Fill reconciler<br/>P&L at the broker's fills"]
+    PF --> F
+```
+
+<details>
+<summary><b>Engine principles</b></summary>
+
+- **One bar series everywhere.** Live indicators, the backtester, the research harness and the RL environment all read the same one-minute IEX bars, keyed by their start minute. Quotes and trade prints move the live price but never add an indicator sample.
+- **One cost model** (`core/costs.py`): half-spread + slippage per market fill, 6 bps round trip by default. Measure your own with the live spread estimate (`state.spread_estimate`).
+- **One exit policy** (`engine/sentinel_agent.py`): the stop closes on the first print through it and is also held at the broker (a bracket leg, or an OCO after a scale-out); the target is a resting limit; half is sold at +1R and the stop then trails; the strategy that opened the position may close it; everything is flat by 15:50; a position with no price for 2 minutes is closed.
+- **Accounting from the broker** (`engine/fills.py`): the realized P&L of every close, including broker bracket fills, is corrected to the actual fill, so the budget, stair ladder, daily ledger and loss halt see what the account really made.
+
+</details>
+
+## 📉 Honest results
 
 TradeFlow used to trade crypto and stocks on a stack of technical signals and exit rules. On paper it lost about $13k in two days while its own ledger reported −$1.6k. The rebuild measured why:
 
@@ -35,42 +151,22 @@ TradeFlow used to trade crypto and stocks on a stack of technical signals and ex
 
 This is a finding, not a failure: liquid large caps on one-minute price and volume features are close to efficient after costs. To find an edge, change the **information** (news, earnings events, order flow, less efficient names) or the **horizon** (overnight, multi-day). Changing the model won't do it. The pipeline is built to test exactly that kind of idea.
 
----
-
-## 🏗️ Architecture
-
-```
- Alpaca IEX stream ─ 1-min bars + quotes ─► minute_bars (authoritative OHLCV)   SPY for market context
-                                                    │
-                ┌───────────────────────────────────┼─────────────────────────────┐
-                ▼                                   ▼                             ▼
-   Portfolio manager (every 2s)            Sentinel (per position)          Learner (after close)
-   strategy entry signal: rl_ppo           stop · target · strategy exit    download new bars
-   ranked by conviction + diversification  stale price · flat by 15:50       retrain PPO (warm start)
-                │                                   │                        deploy only if it beats
-                ▼                                   ▼                        the current policy
-   Risk guard: session, daily-loss halt (booked AND broker equity), drawdown,
-   positions, sector/region caps, hard budget  ──►  Executor: bracket order (stop + target at the broker)
-                                                          │
-                                                 Fill reconciler: every close re-booked at the broker fill
-```
-
-- **One bar series everywhere.** Live indicators, the backtester, the research harness and the RL environment all read the same one-minute IEX bars, keyed by their start minute. Quotes and trade prints move the live price but never add an indicator sample.
-- **One cost model** (`core/costs.py`): half-spread + slippage per market fill, 6 bps round trip by default. Measure your own with the live spread estimate (`state.spread_estimate`).
-- **One exit policy** (`engine/sentinel_agent.py`): the stop closes on the first print through it and is also held at the broker as a bracket leg; the target is a resting limit; the strategy that opened the position may close it; everything is flat by 15:50; a position with no price for 2 minutes is closed.
-- **Accounting from the broker** (`engine/fills.py`): the realized P&L of every close, including broker bracket fills, is corrected to the actual fill, so the budget, stair ladder, daily ledger and loss halt see what the account really made.
-
----
+**v0.1.0, the first live paper day:** 4 closed trades, **−$96**. Ranking stocks on past performance alone shows no edge over two years (t ≈ −0.7). News, discussion and the desk's decisions are judged going forward from their logs. See [CHANGELOG.md](CHANGELOG.md).
 
 ## 🚀 Quick start
 
-### 1. Configure Alpaca paper keys
-```bash
-cp api/.env.example api/.env      # fill ALPACA_API_KEY / ALPACA_SECRET_KEY from your paper account
-```
-With placeholder keys TradeFlow runs a simulated feed and simulated fills.
+**You need:** Docker, a free [Alpaca](https://alpaca.markets) **paper** account, and [Ollama](https://ollama.com) with two models. An NVIDIA GPU with 8 GB is enough for the desk and for training.
 
-### 2. Get data and train the policy (on the host; needs torch, a GPU helps)
+```bash
+git clone https://github.com/gunjanmimo/tradeflow.git && cd tradeflow
+cp api/.env.example api/.env               # fill ALPACA_API_KEY / ALPACA_SECRET_KEY (paper)
+ollama pull qwen3.5:9b && ollama pull qwen3:4b   # the trade desk's analyst and critic
+docker compose up --build                  # dashboard http://localhost:5173 · API http://localhost:8000
+```
+
+Trading starts **paused**: press *Active* in the header. With placeholder keys TradeFlow runs a simulated feed and simulated fills. Without Ollama the trade desk blocks every entry by design.
+
+**Optional: research and train the RL policy** (on the host; needs torch, and a GPU helps):
 ```bash
 cd api
 pip install -r requirements-rl.txt
@@ -78,111 +174,13 @@ python -m research download --days 730     # ~7.4M one-minute bars, ~80 MB, 5 mi
 python -m research edge                    # does any simple signal have an edge after costs?
 python -m rl.train --synthetic             # sanity check: PPO must find a planted edge
 python -m rl.train                         # train on real data, evaluate, gate, deploy
-cat models/rl/report.md
+python -m scout rank                       # today's ranking, printed (does not touch the watchlist)
 ```
 
-### 3. Run the platform
-```bash
-docker compose up --build                 # dashboard http://localhost:5173, API http://localhost:8000
-```
-The live engine runs the deployed policy in numpy; the Docker image does not need torch. Trading starts **paused**: press *Active* in the header. The **RL policy** chip shows whether the policy trades or runs in shadow mode.
+## 📚 Documentation
 
----
-
-## 🤖 The RL policy (`rl/`)
-
-| | |
-|---|---|
-| Episode | one stock, one session, flat at the open and by 15:50 |
-| Decisions | every 5 minutes (close of 09:34, 09:39, …, 15:44); orders fill at the next bar's open |
-| Actions | flat / long. No new entries fill after 15:29 (masked) |
-| Observation | the last 30 bars of 9 per-bar features (returns, range, volume, VWAP and EMA distance, RSI, SPY), 17 session and market features (time of day, gap, return since open, SPY and stock-minus-SPY returns over 5–60 min, ATR), 5 position features |
-| Reward | the step's net log return of the position after costs; no shaping |
-| Rules | bracket stop 1.5×ATR (0.8%–6%) and target 2R from `engine/brackets.py`, checked bar by bar, stop first, gaps at the open |
-| Network | separate actor and critic MLPs (64-32, tanh). The policy starts mostly flat, so each trade has to be earned |
-| Training | PPO with GAE, clipped policy and value losses, entropy bonus, advantage normalisation, linear LR decay, and a cap on how often each training session is replayed |
-| Split | by date: oldest 60% train, next 20% validation (picks the checkpoint), newest 20% test (read once) |
-| Gate | test mean > 0 with t ≥ 2, Sharpe above always-long, validation positive. Only then does `RL_MODE=auto` trade |
-| Champion / challenger | a new policy replaces the deployed one only if it beats it on the same test days |
-
-**Modes** (`RL_MODE`, or the RL panel): `shadow` (default) decides and logs but never trades, `auto` trades only an approved policy, `live` trades any deployed policy (paper only, please), `off` disables it. While another strategy trades, the portfolio manager still asks the policy for a shadow decision on every watched stock. To let the policy trade in its own right, make it the default strategy (`POST /api/strategies/class` with `"strategy":"rl_ppo"`) and set the mode to `auto` or `live`. Every live decision is appended to `api/datasets/rl/live_decisions.jsonl`.
-
-**Proof it learns.** `tests/test_rl.py` trains PPO on synthetic markets. It must earn well over +50 bps/day on unseen days when a regime edge is planted, and must stop trading when there is none. Other tests pin the environment's accounting to hand-computed trades, and hold live features equal to the training features.
-
-```bash
-curl localhost:8000/api/rl                       # mode, gate, test results vs baselines, learning curve
-curl -X POST localhost:8000/api/rl/mode -H 'content-type: application/json' -d '{"mode":"shadow"}'
-curl -X POST localhost:8000/api/rl/retrain       # download new bars + warm-start retrain now
-```
-
----
-
-## 🔬 Research and backtesting
-
-```bash
-python -m research edge --signals reversal_z,gap_fade --horizons 15,60,120
-python -m backtest --days 30 --symbols NVDA,AAPL --strategies supertrend,zscore_reversion
-```
-
-- **`research edge`**: an event study per signal and horizon. Entry at the next open, no overlapping trades, no overnight holds, excess return over a random entry, t-statistics clustered by day, net of costs, with a chronological 40% holdout. Tests assert that no signal looks ahead.
-- **`backtest`**: replays any platform strategy through the live exit rules and reports gross edge per trade against costs per trade.
-- The classic strategy library (`engine/strategies/library.py`: Bollinger, Connors RSI(2), z-score, VWAP, MACD, Supertrend, Donchian and others) is still available per symbol or as the default (`POST /api/strategies/class`). None of them shows an edge after costs on this data.
-
----
-
-## 🪜 Capital Mode: Classic vs Stair
-
-The **Capital mode** chip in the header switches between two ways of managing money. It takes effect on the next evaluation.
-
-- **Classic:** the bots trade a fixed budget.
-- **Stair (profit ratchet):** the deposit is split into *trading capital* and a *reserve* the engine never trades. Each step has a target, by default 2× the step's starting capital. When closed trades reach it, a share of that step's profit (default 50%) is **banked as income** and removed from the trading budget. The rest compounds into the next step.
-
-| Step | Trade with | Target (2×) | Bank 50% | Total banked |
-|---|---|---|---|---|
-| 1 | $500 | $1,000 | $250 | $250 |
-| 2 | $750 | $1,500 | $375 | $625 |
-| 3 | $1,125 | $2,250 | $562 | $1,187 |
-
-(Example: $1,000 deposit, 50% traded, $500 reserve untouched.)
-
-Rules:
-- **Progress counts realised PnL only.** Unrealised gains are never banked.
-- **Stair never raises risk to reach a target.** Strategies, stops and the risk dial are unchanged.
-- **Main broker equity is locked.** When a budget or deposit is assigned to the bot in classic or stair mode, the main broker equity outside the budget cap is strictly locked (`locked_broker_equity = max(0, broker_equity - assigned_capital)`). The bot operates exclusively within its hard cap and never touches locked broker equity or cash.
-- **If trading capital falls below the smallest order the engine can place, new entries stop.** The reserve and banked income are never used to top it up.
-- **Stair refuses to start with capital too small to trade.** At risk dial 4, one position is capped at 15% of capital, so it needs at least $200 of trading capital.
-- **The engine cannot move money.** Reserve and banked income stay as cash at the broker; withdraw them there.
-- **The ladder is saved to `api/data/capital_plan.json`,** so it survives restarts. Banked income carries over when a ladder is restarted.
-
-```bash
-curl localhost:8000/api/capital-plan
-curl -X POST localhost:8000/api/capital-plan -H 'content-type: application/json' \
-     -d '{"mode":"stair","deposit":1000,"deploy_pct":0.5,"target_multiple":2,"harvest_pct":0.5}'
-curl -X POST localhost:8000/api/capital-plan -d '{"mode":"classic"}' -H 'content-type: application/json'
-```
-
----
-
-## 🧮 Daily Profit & Loss Calculator
-
-TradeFlow includes a built-in **Daily Profit & Loss Calculator & Expectancy Simulator**:
-- **Live Performance & Accounting:** Real-time breakdown of today's realized PnL, open unrealized PnL, net PnL, return % on bot budget, win rate %, and profit factor.
-- **Position Scenarios:** Evaluates potential outcomes if all active positions hit Take Profit (best case) vs Stop Loss (worst case).
-- **Interactive Expectancy Simulator:** Allows simulating expected value (EV) per trade, breakeven win rate, and projected daily PnL based on customizable target profit, max daily loss limit, win rate %, and reward-to-risk ratio.
-- **30-Day Historical Ledger:** Persisted daily performance records in `api/data/pnl_ledger.json`.
-
-```bash
-# Get today's PnL breakdown, 30-day history, and scenarios
-curl localhost:8000/api/daily-pnl
-
-# Run projection simulations
-curl -X POST localhost:8000/api/daily-pnl/calculator -H 'content-type: application/json' \
-     -d '{"target_daily_profit": 100, "max_daily_loss": 50, "planned_trades": 5, "win_rate_pct": 60, "reward_risk_ratio": 2.0, "risk_per_trade": 25}'
-```
-
----
-
-## 🔭 Scout: what to watch today (`scout/`)
+<details>
+<summary><b>🔭 Scout: what to watch today (<code>scout/</code>)</b></summary>
 
 Our own stock discovery, with no copy-trading platform in the loop. Every hour the **Scout** agent ranks the stocks worth watching today, in the US and on the world's exchanges, puts the best on the watchlist, and the **Watcher** agent follows each pick live until it is confident enough to trade.
 
@@ -216,22 +214,10 @@ The backtest (98 curated large caps, 453 days) finds **no edge** in the performa
 
 Dashboard: the **Today's watch** card. API: `/api/scout`, `/api/scout/refresh`.
 
----
+</details>
 
-## 💰 Taking profit and protecting positions (`engine/profit_manager.py`)
-
-Measured in R, the trade's own initial risk (entry − initial stop):
-
-- **At +1R**, half the shares are sold and the stop moves to breakeven (+0.05% for costs). The trade can no longer turn into a loss.
-- **After that**, the stop trails the highest price by 1R and only moves up. The original target closes the rest.
-- The stop is held **at the broker**. Entries are real bracket orders, and after a scale-out or a stop raise an OCO (stop + target for the shares left) replaces the old legs. A check every 60 s gives any unprotected position one, so a restart or crash never leaves a position unguarded.
-- A partial sale takes the share count from the broker's live position, never from the engine's copy.
-
-Unlike the removed "harvest", which sold half on *any* uptick and cut winners short, nothing is sold before +1R. Settings: `PROFIT_TAKING_ENABLED`, `SCALE_OUT_AT_R`, `SCALE_OUT_FRACTION`, `TRAIL_DISTANCE_R` in `core/config.py`. The backtester does not model the scale-out yet.
-
----
-
-## 🧑‍⚖️ Trade desk: agents argue every entry (`desk/`)
+<details>
+<summary><b>🧑‍⚖️ Trade desk: agents argue every entry (<code>desk/</code>)</b></summary>
 
 No position opens until a committee of agents has watched the stock and argued the trade. The executor refuses any buy without a fresh desk approval (`DESK_REQUIRED`), and that covers the tick-path fallback too.
 
@@ -250,9 +236,67 @@ The probabilities are the models' own estimates, not calibrated odds. Every case
 
 **News ingestion.** Every headline the news feed or the scout ingests is logged with its named entities and event keywords (`feeds/news_entities.py`): tickers, companies, regulators, brokers, people, places, amounts, and events such as earnings beat, downgrade or FDA approval, each with its usual direction. The log also records which symbols the headline was scored for, by which backend (Jev/Laya), and how long that took. Extraction is rule-based, so it costs no GPU time. The dashboard shows it in the **News ingestion** box; API `/api/news/log`.
 
----
+</details>
 
-## 🌍 Discovery & Diversification
+<details>
+<summary><b>💰 Taking profit and protecting positions (<code>engine/profit_manager.py</code>)</b></summary>
+
+Measured in R, the trade's own initial risk (entry − initial stop):
+
+- **At +1R**, half the shares are sold and the stop moves to breakeven (+0.05% for costs). The trade can no longer turn into a loss.
+- **After that**, the stop trails the highest price by 1R and only moves up. The original target closes the rest.
+- The stop is held **at the broker**. Entries are real bracket orders, and after a scale-out or a stop raise an OCO (stop + target for the shares left) replaces the old legs. A check every 60 s gives any unprotected position one, so a restart or crash never leaves a position unguarded.
+- A partial sale takes the share count from the broker's live position, never from the engine's copy.
+
+Unlike the removed "harvest", which sold half on *any* uptick and cut winners short, nothing is sold before +1R. Settings: `PROFIT_TAKING_ENABLED`, `SCALE_OUT_AT_R`, `SCALE_OUT_FRACTION`, `TRAIL_DISTANCE_R` in `core/config.py`. The backtester does not model the scale-out yet.
+
+</details>
+
+<details>
+<summary><b>🤖 The RL policy (<code>rl/</code>)</b></summary>
+
+| | |
+|---|---|
+| Episode | one stock, one session, flat at the open and by 15:50 |
+| Decisions | every 5 minutes (close of 09:34, 09:39, …, 15:44); orders fill at the next bar's open |
+| Actions | flat / long. No new entries fill after 15:29 (masked) |
+| Observation | the last 30 bars of 9 per-bar features (returns, range, volume, VWAP and EMA distance, RSI, SPY), 17 session and market features (time of day, gap, return since open, SPY and stock-minus-SPY returns over 5–60 min, ATR), 5 position features |
+| Reward | the step's net log return of the position after costs; no shaping |
+| Rules | bracket stop 1.5×ATR (0.8%–6%) and target 2R from `engine/brackets.py`, checked bar by bar, stop first, gaps at the open |
+| Network | separate actor and critic MLPs (64-32, tanh). The policy starts mostly flat, so each trade has to be earned |
+| Training | PPO with GAE, clipped policy and value losses, entropy bonus, advantage normalisation, linear LR decay, and a cap on how often each training session is replayed |
+| Split | by date: oldest 60% train, next 20% validation (picks the checkpoint), newest 20% test (read once) |
+| Gate | test mean > 0 with t ≥ 2, Sharpe above always-long, validation positive. Only then does `RL_MODE=auto` trade |
+| Champion / challenger | a new policy replaces the deployed one only if it beats it on the same test days |
+
+**Modes** (`RL_MODE`, or the RL panel): `shadow` (default) decides and logs but never trades, `auto` trades only an approved policy, `live` trades any deployed policy (paper only, please), `off` disables it. While another strategy trades, the portfolio manager still asks the policy for a shadow decision on every watched stock. To let the policy trade in its own right, make it the default strategy (`POST /api/strategies/class` with `"strategy":"rl_ppo"`) and set the mode to `auto` or `live`. Every live decision is appended to `api/datasets/rl/live_decisions.jsonl`.
+
+**Proof it learns.** `tests/test_rl.py` trains PPO on synthetic markets. It must earn well over +50 bps/day on unseen days when a regime edge is planted, and must stop trading when there is none. Other tests pin the environment's accounting to hand-computed trades, and hold live features equal to the training features.
+
+```bash
+curl localhost:8000/api/rl                       # mode, gate, test results vs baselines, learning curve
+curl -X POST localhost:8000/api/rl/mode -H 'content-type: application/json' -d '{"mode":"shadow"}'
+curl -X POST localhost:8000/api/rl/retrain       # download new bars + warm-start retrain now
+```
+
+</details>
+
+<details>
+<summary><b>🔬 Research and backtesting</b></summary>
+
+```bash
+python -m research edge --signals reversal_z,gap_fade --horizons 15,60,120
+python -m backtest --days 30 --symbols NVDA,AAPL --strategies supertrend,zscore_reversion
+```
+
+- **`research edge`**: an event study per signal and horizon. Entry at the next open, no overlapping trades, no overnight holds, excess return over a random entry, t-statistics clustered by day, net of costs, with a chronological 40% holdout. Tests assert that no signal looks ahead.
+- **`backtest`**: replays any platform strategy through the live exit rules and reports gross edge per trade against costs per trade.
+- The classic strategy library (`engine/strategies/library.py`: Bollinger, Connors RSI(2), z-score, VWAP, MACD, Supertrend, Donchian and others) is still available per symbol or as the default (`POST /api/strategies/class`). None of them shows an edge after costs on this data.
+
+</details>
+
+<details>
+<summary><b>🌍 Discovery and diversification</b></summary>
 
 Discovery finds stocks you don't hold yet. Diversification keeps the book from being one bet. Both are driven by the same 1-10 risk dial.
 
@@ -289,7 +333,81 @@ Missing components don't vote. Nothing is traded until you promote a candidate t
 
 Open it from the **Discovery** chip in the dashboard header. API: `/api/discovery`, `/api/discovery/promote`, `/api/discovery/what-if/{symbol}`, `/api/diversification`.
 
----
+</details>
+
+<details>
+<summary><b>🪜 Capital mode: classic vs stair</b></summary>
+
+The **Capital mode** chip in the header switches between two ways of managing money. It takes effect on the next evaluation.
+
+- **Classic:** the bots trade a fixed budget.
+- **Stair (profit ratchet):** the deposit is split into *trading capital* and a *reserve* the engine never trades. Each step has a target, by default 2× the step's starting capital. When closed trades reach it, a share of that step's profit (default 50%) is **banked as income** and removed from the trading budget. The rest compounds into the next step.
+
+| Step | Trade with | Target (2×) | Bank 50% | Total banked |
+|---|---|---|---|---|
+| 1 | $500 | $1,000 | $250 | $250 |
+| 2 | $750 | $1,500 | $375 | $625 |
+| 3 | $1,125 | $2,250 | $562 | $1,187 |
+
+(Example: $1,000 deposit, 50% traded, $500 reserve untouched.)
+
+Rules:
+- **Progress counts realised PnL only.** Unrealised gains are never banked.
+- **Stair never raises risk to reach a target.** Strategies, stops and the risk dial are unchanged.
+- **Main broker equity is locked.** When a budget or deposit is assigned to the bot in classic or stair mode, the main broker equity outside the budget cap is strictly locked (`locked_broker_equity = max(0, broker_equity - assigned_capital)`). The bot operates exclusively within its hard cap and never touches locked broker equity or cash.
+- **If trading capital falls below the smallest order the engine can place, new entries stop.** The reserve and banked income are never used to top it up.
+- **Stair refuses to start with capital too small to trade.** At risk dial 4, one position is capped at 15% of capital, so it needs at least $200 of trading capital.
+- **The engine cannot move money.** Reserve and banked income stay as cash at the broker; withdraw them there.
+- **The ladder is saved to `api/data/capital_plan.json`,** so it survives restarts. Banked income carries over when a ladder is restarted.
+
+```bash
+curl localhost:8000/api/capital-plan
+curl -X POST localhost:8000/api/capital-plan -H 'content-type: application/json' \
+     -d '{"mode":"stair","deposit":1000,"deploy_pct":0.5,"target_multiple":2,"harvest_pct":0.5}'
+curl -X POST localhost:8000/api/capital-plan -d '{"mode":"classic"}' -H 'content-type: application/json'
+```
+
+</details>
+
+<details>
+<summary><b>🧮 Daily profit and loss calculator</b></summary>
+
+TradeFlow includes a built-in **Daily Profit & Loss Calculator & Expectancy Simulator**:
+- **Live Performance & Accounting:** Real-time breakdown of today's realized PnL, open unrealized PnL, net PnL, return % on bot budget, win rate %, and profit factor.
+- **Position Scenarios:** Evaluates potential outcomes if all active positions hit Take Profit (best case) vs Stop Loss (worst case).
+- **Interactive Expectancy Simulator:** Allows simulating expected value (EV) per trade, breakeven win rate, and projected daily PnL based on customizable target profit, max daily loss limit, win rate %, and reward-to-risk ratio.
+- **30-Day Historical Ledger:** Persisted daily performance records in `api/data/pnl_ledger.json`.
+
+```bash
+# Get today's PnL breakdown, 30-day history, and scenarios
+curl localhost:8000/api/daily-pnl
+
+# Run projection simulations
+curl -X POST localhost:8000/api/daily-pnl/calculator -H 'content-type: application/json' \
+     -d '{"target_daily_profit": 100, "max_daily_loss": 50, "planned_trades": 5, "win_rate_pct": 60, "reward_risk_ratio": 2.0, "risk_per_trade": 25}'
+```
+
+</details>
+
+Working on the code with Claude Code? [CLAUDE.md](CLAUDE.md) has the commands, gotchas and design rules.
+
+## 📍 Roadmap
+
+- [ ] **Volatility-scaled stops:** size stops to each stock's normal range, not a flat 0.8% minimum.
+- [ ] **Model the +1R scale-out in the backtester,** so profit-taking is judged over many days.
+- [ ] **An "Agents' thinking" panel:** live lean, odds and drivers for every watched stock (the backend is ready).
+- [ ] **A scorecard verdict:** do the scout's news and discussion signals beat the pool?
+- [ ] **RL training on discovered stocks** instead of a fixed research universe.
+
+Ideas and PRs are welcome. See [Contributing](#-contributing).
+
+## ⭐ Support the project
+
+If TradeFlow taught you something, saved you time, or you just like the idea of a trading bot that tells the truth about its results, **please give it a star**. It's free, it helps others find the project, and it motivates further work.
+
+<a href="https://star-history.com/#gunjanmimo/tradeflow&Date">
+  <img src="https://api.star-history.com/svg?repos=gunjanmimo/tradeflow&type=Date" alt="Star history" width="600">
+</a>
 
 ## 🏷️ Versioning
 
@@ -298,8 +416,6 @@ Current version: **`0.1.0`**. See [CHANGELOG.md](CHANGELOG.md) for what changed.
 TradeFlow follows [Semantic Versioning](https://semver.org). While it stays on `0.x`, treat it as an experimental side project: anything may change. The version is **not bumped for every change**. It moves only when a significant update lands, and each bump gets a matching git tag (`vX.Y.Z`) and GitHub release.
 
 The version lives in `api/core/version.py` (backend, also reported by `GET /api/status`) and `app/package.json` (frontend). Keep them in sync when bumping.
-
----
 
 ## 🤝 Contributing
 
@@ -312,6 +428,16 @@ TradeFlow is a **free, open-source, AI-based trading platform for your own perso
 
 Found a problem but don't have a fix? Opening an issue helps too.
 
+## 🙏 Acknowledgements
+
+[Alpaca](https://alpaca.markets) (market data and paper trading) · [Ollama](https://ollama.com) with [Qwen](https://github.com/QwenLM) models · [SEC EDGAR](https://www.sec.gov/edgar) · [TradingView](https://www.tradingview.com) screener · [ApeWisdom](https://apewisdom.io) · [StockTwits](https://stocktwits.com) · Laya and Jev (TypeSafe) for sentiment.
+
 ## 📄 License
 
 Released under the [MIT License](LICENSE). Third-party services, models and data sources this project connects to (Alpaca, the Laya model, SEC EDGAR, eToro, StockTwits and others) are governed by their own terms, which you are responsible for following.
+
+<div align="center">
+
+**Made with curiosity and a healthy respect for the market. If it helped, a ⭐ goes a long way.**
+
+</div>
