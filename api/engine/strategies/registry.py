@@ -35,10 +35,10 @@ _STRATEGIES: Dict[str, Strategy] = {
     )
 }
 
-# The PPO policy decides by default. It places orders only once a trained policy
-# has passed its promotion gate (settings.RL_MODE = "auto"); until then it runs
-# in shadow mode and the platform stays flat.
-DEFAULT_BY_CLASS: Dict[str, str] = {EQUITY: "rl_ppo"}
+# News sentiment (Jev, with Laya as fallback) trades by default. The PPO policy
+# runs in shadow mode beside it (settings.RL_MODE): it decides and logs every
+# bar and retrains after each close, but places no orders.
+DEFAULT_BY_CLASS: Dict[str, str] = {EQUITY: "news_catalyst"}
 
 
 def asset_class(symbol: str) -> str:
@@ -59,7 +59,7 @@ def is_compatible(name: str, klass: str = EQUITY) -> bool:
 
 def resolve(symbol: str, class_defaults: Dict[str, str],
             overrides: Dict[str, str]) -> Strategy:
-    """The override for this symbol, else the configured default, else rl_ppo."""
+    """The override for this symbol, else the configured default, else news_catalyst."""
     name = overrides.get(symbol)
     if name and name in _STRATEGIES:
         return _STRATEGIES[name]

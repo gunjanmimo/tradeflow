@@ -115,3 +115,12 @@ def test_an_inherited_position_is_not_judged_by_a_policy_that_never_opened_it(wo
     assert sent == [] and state.active_positions[SYM]["inherited"]
     _run(bot, 98.9)                                     # the stop still protects it
     assert len(sent) == 1 and "Stop-loss" in sent[0].reason
+
+
+def test_dust_waits_for_the_regular_session(world, monkeypatch):
+    bot, sent, _ = world
+    monkeypatch.setattr(mh, "us_session", lambda *a, **k: mh.PRE)
+    monkeypatch.setattr(mh, "minutes_to_close", lambda *a, **k: None)
+    state.active_positions[SYM]["qty"] = 0.0079
+    _run(bot, 100.1)
+    assert sent == []

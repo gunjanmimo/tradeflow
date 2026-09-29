@@ -277,3 +277,24 @@ def test_no_entries_near_the_close(world, monkeypatch):
     asyncio.run(mgr.run_cycle())
     assert executed == []
     assert mgr.blocked_by.get("too close to the market close") == 1
+
+
+def test_rl_decides_in_shadow_for_every_watched_stock(world, monkeypatch):
+    """With news trading, the RL policy still decides (and logs) for each watched stock."""
+    mgr, executed = world
+    from rl import live
+    asked = []
+    monkeypatch.setattr(live.runtime, "ready", lambda: True)
+    monkeypatch.setattr(live.runtime, "set_mode", live.runtime.set_mode)
+    live.runtime.set_mode("shadow")
+    monkeypatch.setattr(live.runtime, "decide", lambda sym, pos=None, now=None: asked.append(sym))
+    monkeypatch.setitem(state.strategy_class_defaults, "equity", "news_catalyst")
+    _price("AAPL")
+    _signals(monkeypatch, {})
+    asyncio.run(mgr.run_cycle())
+    assert set(asked) == set(state.watchlist)
+    asked.clear()
+    monkeypatch.setitem(state.strategy_class_defaults, "equity", "rl_ppo")
+    asyncio.run(mgr.run_cycle())
+    assert asked == []            # rl_ppo trades itself: no separate shadow pass
+    live.runtime.mode_override = None

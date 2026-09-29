@@ -196,7 +196,7 @@ class InMemoryState:
         # The default strategy, and per-symbol overrides that win over it.
         # Changed live from the API; read on every tick.
         self.strategy_class_defaults: Dict[str, str] = {
-            "equity": "rl_ppo",
+            "equity": "news_catalyst",
         }
         self.strategy_overrides: Dict[str, str] = {}
         # Last entry-gate evaluation per symbol, so the UI can explain a no-trade.

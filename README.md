@@ -7,7 +7,9 @@
 >
 > Start with **paper trading** (the default), read the code before trusting it, and never trade money you cannot afford to lose. The software is provided "as is", without warranty of any kind (see [LICENSE](LICENSE)).
 
-TradeFlow day-trades **US equities** on Alpaca. A reinforcement-learning agent (PPO) decides every five minutes whether to hold a stock or stay flat. It trains on two years of one-minute bars under the same fills, stops, costs and session rules that live trading uses. It is only allowed to place orders once it has made money, with statistical significance, on days it never trained on. Until then it runs in **shadow mode**: it logs what it would do and trades nothing.
+TradeFlow day-trades **US equities** on Alpaca. By default **news sentiment trades**: headlines scored by Jev (TypeSafe), with Laya as fallback, drive the `news_catalyst` strategy, which enters on several fresh, agreeing, bullish headlines confirmed by the price trend.
+
+Beside it, a reinforcement-learning agent (PPO) runs in **shadow mode**. Every five minutes it decides whether each watched stock should be held or flat and logs that decision. It retrains after each close, and never places an order. It trains on one-minute bars under the same fills, stops, costs and session rules that live trading uses. It may only trade (`RL_MODE=auto`) once it has made money, with statistical significance, on days it never trained on.
 
 The platform is built around one question: **does this have an edge after costs?** Every idea goes through the same pipeline before it can trade:
 
@@ -103,7 +105,7 @@ The live engine runs the deployed policy in numpy; the Docker image does not nee
 | Gate | test mean > 0 with t ≥ 2, Sharpe above always-long, validation positive. Only then does `RL_MODE=auto` trade |
 | Champion / challenger | a new policy replaces the deployed one only if it beats it on the same test days |
 
-**Modes** (`RL_MODE`, or the RL panel): `auto` trades only an approved policy, `shadow` never trades, `live` trades any deployed policy (paper only, please), `off` disables it. Every live decision is appended to `api/datasets/rl/live_decisions.jsonl`.
+**Modes** (`RL_MODE`, or the RL panel): `shadow` (default) decides and logs but never trades, `auto` trades only an approved policy, `live` trades any deployed policy (paper only, please), `off` disables it. While another strategy trades, the portfolio manager still asks the policy for a shadow decision on every watched stock. To let the policy trade in its own right, make it the default strategy (`POST /api/strategies/class` with `"strategy":"rl_ppo"`) and set the mode to `auto` or `live`. Every live decision is appended to `api/datasets/rl/live_decisions.jsonl`.
 
 **Proof it learns.** `tests/test_rl.py` trains PPO on synthetic markets. It must earn well over +50 bps/day on unseen days when a regime edge is planted, and must stop trading when there is none. Other tests pin the environment's accounting to hand-computed trades, and hold live features equal to the training features.
 

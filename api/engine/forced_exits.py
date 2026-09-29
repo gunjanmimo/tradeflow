@@ -74,6 +74,11 @@ def check(symbol: str, pos: Dict[str, Any], pnl_pct: float, watching_since: floa
 
 
 def dust_exit(pos: Dict[str, Any]) -> Optional[str]:
+    # Fractional shares only trade in the regular session: outside it the close
+    # would be refused and retried all night. The flatten covers the rest.
+    from core.market_hours import us_session, REGULAR
+    if us_session() != REGULAR:
+        return None
     qty = float(pos.get("qty") or 0.0)
     price = float(pos.get("current_price") or pos.get("avg_entry_price") or 0.0)
     value = qty * price

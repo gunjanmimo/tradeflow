@@ -266,6 +266,7 @@ class PortfolioManager:
         blocked: Counter = Counter()
 
         cands = self._gather(now, blocked)
+        self._shadow_rl()
         await asyncio.sleep(0)
 
         # Only ask the risk guard once trading is on: paused, it would refuse every
@@ -318,6 +319,24 @@ class PortfolioManager:
         self.last_cycle_at = time.time()
         self.last_cycle_ms = (time.perf_counter() - t0) * 1000
         self._log_transition()
+
+    def _shadow_rl(self):
+        """
+        When another strategy trades, the RL policy still decides for every
+        watched stock (as if flat) and logs it, so its live record keeps
+        growing while it places no orders. Decisions are cached per 5-minute
+        decision bar, so this costs a dictionary lookup on most cycles.
+        """
+        if state.strategy_class_defaults.get("equity") == "rl_ppo":
+            return
+        try:
+            from rl.live import runtime
+            if runtime.mode == "off" or not runtime.ready():
+                return
+            for sym in sorted(state.watchlist):
+                runtime.decide(sym, None)
+        except Exception as e:
+            logger.debug(f"Shadow RL decision failed: {e}")
 
     @staticmethod
     def _slots(executor) -> int:

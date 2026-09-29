@@ -241,11 +241,12 @@ class Settings(BaseSettings):
 
     # --- RL policy (rl/, engine/strategies/rl_ppo.py) ---
     # auto    trades (paper) only when the deployed policy passed its promotion
-    #         gate on unseen days; otherwise runs in shadow mode (default)
-    # shadow  decides and logs every decision, never places an order
+    #         gate on unseen days; otherwise runs in shadow mode
+    # shadow  decides and logs every decision, never places an order (default:
+    #         news sentiment trades while the policy keeps learning)
     # live    trades whatever policy is deployed, gate or not (use with care)
     # off     not consulted
-    RL_MODE: str = Field(default=os.getenv("RL_MODE", "auto"))
+    RL_MODE: str = Field(default=os.getenv("RL_MODE", "shadow"))
     # Streamed and backfilled for market context (the policy reads SPY), never traded
     # unless also on the watchlist.
     CONTEXT_SYMBOLS: tuple = ("SPY",)
