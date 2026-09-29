@@ -293,9 +293,9 @@ Open it from the **Discovery** chip in the dashboard header. API: `/api/discover
 
 ## 🏷️ Versioning
 
-Current version: **`0.0.0`** (pre-release).
+Current version: **`0.1.0`**. See [CHANGELOG.md](CHANGELOG.md) for what changed.
 
-TradeFlow follows [Semantic Versioning](https://semver.org). While it stays on `0.0.x`, treat it as an experimental side project: anything may change. The version is **not bumped for every change**. It moves only when a significant update lands, and each bump gets a matching git tag (`vX.Y.Z`) and GitHub release.
+TradeFlow follows [Semantic Versioning](https://semver.org). While it stays on `0.x`, treat it as an experimental side project: anything may change. The version is **not bumped for every change**. It moves only when a significant update lands, and each bump gets a matching git tag (`vX.Y.Z`) and GitHub release.
 
 The version lives in `api/core/version.py` (backend, also reported by `GET /api/status`) and `app/package.json` (frontend). Keep them in sync when bumping.
 
