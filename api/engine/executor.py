@@ -34,6 +34,8 @@ class AlpacaExecutor:
         self.is_connected = False
         self.is_mock_mode = False
         self.alpaca_tradable_symbols: set[str] = set()
+        # symbol -> Alpaca's asset name (identifies leveraged / inverse ETFs)
+        self.alpaca_asset_names: Dict[str, str] = {}
         self.pending_orders: set[str] = set()
         # Symbols with a close/liquidation order currently in flight.
         # Guards against the sentinel firing a second close while the first
@@ -217,6 +219,7 @@ class AlpacaExecutor:
                     from alpaca.trading.enums import AssetClass
                     assets = self.trading_client.get_all_assets(
                         GetAssetsRequest(asset_class=AssetClass.US_EQUITY))
+                    self.alpaca_asset_names = {a.symbol: a.name or "" for a in assets if a.tradable}
                     return {a.symbol for a in assets if a.tradable}
                 except Exception as ex:
                     logger.debug(f"Could not load asset catalog: {ex}")

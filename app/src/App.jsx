@@ -5,6 +5,7 @@ import { DiscoveryChip, DiscoveryPanel } from './DiscoveryPanel';
 import { ManagerChip, ManagerPanel } from './ManagerPanel';
 import { DailyPnlChip, DailyPnlCalculatorModal } from './DailyPnlCalculator';
 import { RLChip, RLPanel } from './RLPanel';
+import { SmartMoneyPanel } from './SmartMoneyPanel';
 import { MarketsModal } from './MarketsModal';
 import { HugeiconsIcon } from '@hugeicons/react';
 import { 
@@ -392,7 +393,6 @@ export default function App() {
   const hardCap = telemetry.budget?.hard_cap ?? telemetry.budget?.allocated_capital ?? 0;
   const dailyPnl = telemetry.daily_pnl || {};
   const dailyNetPnl = Number(dailyPnl.net_pnl ?? ((rp.realized_pnl_today || 0) + totalPnL));
-  const trendsList = Object.values(telemetry.aggregated_trends || {});
   const clock = telemetry.market_clock || {};
 
   return (
@@ -818,7 +818,7 @@ export default function App() {
               <div className="flex items-center space-x-2">
                 <Compass className="w-5 h-5 text-cyan-400" />
                 <h2 className="font-semibold text-base text-slate-100">
-                  Smart-Money Consensus
+                  Smart money
                   <span className="ml-2 text-xs font-normal text-slate-500">
                     {(telemetry.source_health?.real_sources_available || []).join(' + ') || 'no source reachable'}
                     {Object.entries(telemetry.source_health?.sources || {})
@@ -827,68 +827,13 @@ export default function App() {
                   </span>
                 </h2>
               </div>
-              <span className="text-[10px] px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 font-mono">
-                WEIGHTED CONSENSUS
+              <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 font-mono">
+                {(telemetry.smart_money?.rows || []).filter((r) => r.verdict === 'BUY' && r.tradable).length} TRADING
               </span>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 font-mono">
-              {trendsList.map((t) => {
-                const score = t.consensus_score || 0.5;
-                const isStrongBull = t.sentiment_bias === 'STRONG_BULL';
-                const isBull = t.sentiment_bias === 'BULL';
-                const isDivergent = t.sentiment_bias === 'DIVERGENT';
-
-                return (
-                  <div key={t.symbol} className="bg-slate-900/90 border border-slate-800 rounded-xl p-3 flex flex-col justify-between">
-                    <div>
-                      <div className="flex items-center justify-between mb-1.5">
-                        <div className="flex items-center space-x-2">
-                          <span className="font-bold text-sm text-slate-100">{t.symbol}</span>
-                          <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
-                            isStrongBull ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' :
-                            isBull ? 'bg-cyan-500/20 text-cyan-400' :
-                            isDivergent ? 'bg-amber-500/20 text-amber-400' :
-                            'bg-slate-800 text-slate-400'
-                          }`}>
-                            {t.sentiment_bias}
-                          </span>
-                        </div>
-                        <span className="text-xs font-bold text-emerald-400">
-                          {(score * 100).toFixed(0)}% Score
-                        </span>
-                      </div>
-
-                      {/* Source badges */}
-                      <div className="flex flex-wrap gap-1.5 mb-2 text-[10px]">
-                        {t.signals?.sec && (
-                          <span className="px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-300 border border-blue-500/20 inline-flex items-center space-x-1" title={t.signals.sec.details}>
-                            <Building className="w-3 h-3 text-blue-400" />
-                            <span>SEC Form 4</span>
-                          </span>
-                        )}
-                        {t.signals?.etoro && (
-                          <span className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 inline-flex items-center space-x-1" title={t.signals.etoro.details}>
-                            <Users className="w-3 h-3 text-emerald-400" />
-                            <span>eToro Copy</span>
-                          </span>
-                        )}
-                        {t.signals?.stocktwits && (
-                          <span className="px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20 inline-flex items-center space-x-1" title={t.signals.stocktwits.details}>
-                            <Comment className="w-3 h-3 text-amber-400" />
-                            <span>StockTwits</span>
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    <p className="text-[10px] text-slate-400 line-clamp-2 italic font-sans">
-                      {t.thesis}
-                    </p>
-                  </div>
-                );
-              })}
-            </div>
+            <SmartMoneyPanel data={telemetry.smart_money}
+              sources={(telemetry.source_health?.real_sources_available || []).join(' + ')} />
           </div>
           
           {/* Card: Watchlist & Sub-Second Evaluation */}

@@ -171,10 +171,38 @@ class CuratorAgent(Agent):
     def interval(self) -> float:
         return settings.CURATOR_INTERVAL_SECONDS
 
+    def __init__(self):
+        super().__init__()
+        self.smart_added: set = set()      # symbols this agent added as smart-money buys
+
+    async def _smart_money(self):
+        """Tradable smart-money BUYs go on the watchlist; ones that stop qualifying come off."""
+        if not settings.SMART_MONEY_TRADING:
+            return
+        from engine.smart_money import smart_money
+        from feeds.daily_bars import daily_bars
+        from feeds.alpaca_stream import market_stream
+        syms = [s for s in smart_money.symbols() if smart_money.verdict(s)["verdict"] == "BUY"]
+        if syms:
+            await daily_bars.ensure(syms)          # price and liquidity for the tradable check
+        buys = set(smart_money.buy_list())
+        for sym in sorted(buys - set(state.watchlist)):
+            state.watchlist.add(sym)
+            self.smart_added.add(sym)
+            await market_stream.ensure_stock_subscription(sym)
+            state.log_event("SMART_MONEY", f"{sym} added to the watchlist: "
+                                           + "; ".join(smart_money.verdict(sym)["reasons"]))
+        for sym in sorted(self.smart_added - buys):
+            self.smart_added.discard(sym)
+            if sym in state.watchlist and sym not in state.active_positions:
+                state.watchlist.discard(sym)
+                state.log_event("SMART_MONEY", f"{sym} removed from the watchlist: no longer a tradable buy")
+
     async def step(self):
         from engine.discovery import discovery
         before = set(state.watchlist)
         await discovery._auto_select()
+        await self._smart_money()
         added = sorted(set(state.watchlist) - before)
         dropped = sorted(before - set(state.watchlist))
         if added:

@@ -30,6 +30,8 @@ class DailyBarCache:
     def __init__(self):
         # symbol -> (day numbers since epoch, adjusted closes)
         self.series: Dict[str, tuple] = {}
+        # symbol -> average daily dollar volume over the last 20 sessions
+        self.dollar_volume: Dict[str, float] = {}
         self.fetched_at: Dict[str, float] = {}
         self.last_error: Optional[str] = None
         self.last_refresh_at: float = 0.0
@@ -112,10 +114,12 @@ class DailyBarCache:
                 continue
             days = np.array([int(b.timestamp.timestamp() // 86400) for b in bars], dtype=np.int64)
             closes = np.array([float(b.close) for b in bars], dtype=float)
+            vols = np.array([float(b.volume or 0.0) for b in bars], dtype=float)
             ok = closes > 0
             if ok.sum() < 20:
                 continue
             self.series[sym] = (days[ok], closes[ok])
+            self.dollar_volume[sym] = float((closes[ok] * vols[ok])[-20:].mean())
             got += 1
         self.last_error = None
         return got

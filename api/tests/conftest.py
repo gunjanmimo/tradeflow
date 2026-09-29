@@ -13,9 +13,12 @@ def _isolated_state_files(tmp_path, monkeypatch):
     import core.pnl_ledger as pl
     import core.capital_plan as cp
     import core.market_filter as mf
-    for mod, name in ((pl, "pnl_ledger.json"), (cp, "capital_plan.json"), (mf, "market_filter.json")):
+    import engine.smart_money as sm
+    for mod, name in ((pl, "pnl_ledger.json"), (cp, "capital_plan.json"), (mf, "market_filter.json"),
+                      (sm, "smart_money.json")):
         monkeypatch.setattr(mod, "_DATA_DIR", str(tmp_path))
         monkeypatch.setattr(mod, "_PATH", str(tmp_path / name))
     # The ledger singleton was loaded from the real file at import: start empty.
     monkeypatch.setattr(pl.pnl_ledger, "days", {})
+    monkeypatch.setattr(sm, "smart_money", sm.SmartMoneyBook())
     yield

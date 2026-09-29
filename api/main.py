@@ -99,6 +99,7 @@ async def broadcast_telemetry():
                         for k, v in trend_aggregator.aggregated_trends.items()
                     },
                     "source_health": trend_aggregator.health(),
+                    "smart_money": _smart_money_snapshot(),
                     "strategy_routing": {
                         sym: strategy_registry.resolve(
                             sym, state.strategy_class_defaults, state.strategy_overrides
@@ -193,6 +194,22 @@ def _diversification_brief() -> Dict[str, Any]:
         "effective_bets": risk.get("effective_bets"),
         "candidates": len(discovery.candidates),
     }
+
+
+_sm_cache: Dict[str, Any] = {"at": 0.0, "data": None}
+
+
+def _smart_money_snapshot() -> Dict[str, Any]:
+    """The smart-money book for the dashboard, rebuilt at most every 5 seconds (telemetry is 4 Hz)."""
+    from engine.smart_money import smart_money
+    now = time.time()
+    if _sm_cache["data"] is None or now - _sm_cache["at"] > 5.0:
+        snap = smart_money.snapshot()
+        for r in snap["rows"]:
+            r["on_watchlist"] = r["symbol"] in state.watchlist
+            r["held"] = r["symbol"] in state.active_positions
+        _sm_cache.update(at=now, data=snap)
+    return _sm_cache["data"]
 
 
 @asynccontextmanager
@@ -584,6 +601,13 @@ async def quant_analyze(symbol: str):
 async def quant_portfolio():
     """Portfolio analytics: ledger performance ratios and open-position VaR/CVaR."""
     return state.portfolio_analytics or {"status": "warming up"}
+
+
+@app.get("/api/smart-money")
+async def get_smart_money():
+    """Every smart-money symbol with its verdict (BUY / HOLD / AVOID), reasons, and why a BUY is not traded."""
+    _sm_cache["data"] = None
+    return _smart_money_snapshot()
 
 
 class RLModeRequest(BaseModel):

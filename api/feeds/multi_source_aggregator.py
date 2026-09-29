@@ -57,6 +57,8 @@ class SourceSignal:
     details: str
     is_real: bool = True         # provenance flag; only real data may size a trade
     observed_at: float = field(default_factory=time.time)
+    value_usd: float = 0.0       # Form 4: net dollar value bought (+) or sold (-)
+    breadth: float = 0.0         # eToro: share of the top investors holding it
 
 
 @dataclass
@@ -247,12 +249,12 @@ class MultiSourceTrendAggregator:
             conviction = min(0.95, 0.55 + min(net / 5_000_000.0, 1.0) * 0.40)
             return SourceSignal(
                 "SEC Form 4", symbol, round(conviction, 3), "BULLISH",
-                f"{owner} open-market PURCHASE of ${net:,.0f} (Form 4)",
+                f"{owner} open-market PURCHASE of ${net:,.0f} (Form 4)", value_usd=round(net, 2),
             )
         conviction = min(0.95, 0.55 + min(-net / 5_000_000.0, 1.0) * 0.40)
         return SourceSignal(
             "SEC Form 4", symbol, round(conviction, 3), "BEARISH",
-            f"{owner} net SALE of ${-net:,.0f} (Form 4)",
+            f"{owner} net SALE of ${-net:,.0f} (Form 4)", value_usd=round(net, 2),
         )
 
     # -----------------------------------------------------------------
@@ -354,7 +356,7 @@ class MultiSourceTrendAggregator:
                         "eToro", sym, round(conviction, 3),
                         "BULLISH" if breadth >= 0.20 else "NEUTRAL",
                         f"Held by {n}/{counted} top Popular Investors "
-                        f"(avg allocation {depth*100:.1f}%)",
+                        f"(avg allocation {depth*100:.1f}%)", breadth=round(breadth, 3),
                     ))
 
             self._mark_health("eToro", True,
@@ -556,6 +558,14 @@ class MultiSourceTrendAggregator:
             # sentiment was the circular-reasoning bug at the heart of the old
             # design. Laya scores real news text only; consensus is a separate,
             # independently-weighted input.
+
+        # Smart-money verdicts keep their own dated record: an insider purchase is
+        # a multi-day signal, while consensus above expires after an hour.
+        try:
+            from engine.smart_money import smart_money
+            smart_money.ingest(collected)
+        except Exception as e:
+            logger.warning(f"Smart-money book update failed: {e}")
 
         available = [n for n, h in self.source_health.items() if h.get("available")]
         state.log_event(

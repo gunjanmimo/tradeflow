@@ -257,6 +257,18 @@ class Settings(BaseSettings):
     RL_RETRAIN_AFTER_CLOSE_MINUTES: float = 30.0
     RL_RETRAIN_ITERATIONS: int = 120
 
+    # --- Smart money (engine/smart_money.py, engine/strategies/smart_money.py) ---
+    # Tradable BUYs (sizeable insider purchases, broad top-investor ownership;
+    # liquid US stocks only) are put on the watchlist and day-traded by the
+    # smart_money strategy. Everything else stays with the default strategy.
+    SMART_MONEY_TRADING: bool = True
+    SMART_MONEY_LOOKBACK_DAYS: float = 5.0         # an insider purchase counts this long
+    SMART_MONEY_MIN_BUY_USD: float = 100_000.0     # smaller purchases are noise
+    SMART_MONEY_MIN_BREADTH: float = 0.20          # share of the top eToro investors holding it
+    SMART_MONEY_MIN_PRICE: float = 5.0
+    SMART_MONEY_MIN_DOLLAR_VOLUME: float = 10_000_000.0   # average daily $ traded
+    SMART_MONEY_FIRST_ENTRY_MINUTES: float = 30.0  # no entries in the first half hour
+
     # --- Curator: moves discovery's best picks onto the watchlist ---
     CURATOR_INTERVAL_SECONDS: float = 30.0
 

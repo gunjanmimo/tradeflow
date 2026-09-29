@@ -18,6 +18,7 @@ from engine.strategies.mean_reversion import MeanReversionStrategy
 from engine.strategies.library import LIBRARY
 from engine.strategies.adaptive import AdaptiveStrategy
 from engine.strategies.rl_ppo import RLPolicyStrategy
+from engine.strategies.smart_money import SmartMoneyStrategy
 
 logger = logging.getLogger("tradeflow.strategies")
 
@@ -27,6 +28,7 @@ EQUITY = "equity"
 _STRATEGIES: Dict[str, Strategy] = {
     s.name: s for s in (
         RLPolicyStrategy(),
+        SmartMoneyStrategy(),
         NewsCatalystStrategy(),
         StockScoreStrategy(),
         MeanReversionStrategy(),
@@ -59,16 +61,32 @@ def is_compatible(name: str, klass: str = EQUITY) -> bool:
 
 def resolve(symbol: str, class_defaults: Dict[str, str],
             overrides: Dict[str, str]) -> Strategy:
-    """The override for this symbol, else the configured default, else news_catalyst."""
+    """
+    The override for this symbol; else smart_money for a tradable smart-money
+    BUY (settings.SMART_MONEY_TRADING); else the configured default.
+    """
     name = overrides.get(symbol)
     if name and name in _STRATEGIES:
         return _STRATEGIES[name]
+    if _is_smart_money_buy(symbol):
+        return _STRATEGIES["smart_money"]
     name = class_defaults.get(EQUITY) or DEFAULT_BY_CLASS[EQUITY]
     strat = _STRATEGIES.get(name)
     if strat is None:
         logger.warning("Unknown default strategy %s; falling back to %s", name, DEFAULT_BY_CLASS[EQUITY])
         strat = _STRATEGIES[DEFAULT_BY_CLASS[EQUITY]]
     return strat
+
+
+def _is_smart_money_buy(symbol: str) -> bool:
+    from core.config import settings
+    if not settings.SMART_MONEY_TRADING:
+        return False
+    try:
+        from engine.smart_money import smart_money
+        return smart_money.verdict(symbol)["verdict"] == "BUY" and smart_money.tradable(symbol) is None
+    except Exception:
+        return False
 
 
 def for_position(symbol: str, position: Optional[Dict], class_defaults: Dict[str, str],
