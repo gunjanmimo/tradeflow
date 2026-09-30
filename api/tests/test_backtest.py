@@ -110,3 +110,80 @@ def test_nothing_is_held_through_the_close():
 def test_no_entries_in_the_last_half_hour():
     tape = _tape(_flat(120), start=(14, 0))
     assert sim.run(tape, Once(at=110), 1000.0) == []                 # 15:50: inside the cutoff
+
+
+# --- profit-taking (engine/profit_manager.py), as the live executor runs it ---
+
+W = 20                                   # warm-up bars before the entry
+
+
+def _scale_settings(monkeypatch, at_r=1.0, fraction=0.5, trail_r=1.0):
+    from core.config import settings
+    monkeypatch.setattr(settings, "PROFIT_TAKING_ENABLED", True)
+    monkeypatch.setattr(settings, "SCALE_OUT_AT_R", at_r)
+    monkeypatch.setattr(settings, "SCALE_OUT_FRACTION", fraction)
+    monkeypatch.setattr(settings, "TRAIL_DISTANCE_R", trail_r)
+    return settings
+
+
+def _book_with_stop(tape, i, stop, tp, notional=1000.0):
+    b = sim.Book(tape, "x", i, notional)
+    b.pos.update(stop_loss=stop, initial_stop=stop, take_profit=tp)
+    return b
+
+
+def test_scale_out_sells_half_at_plus_1r_then_the_rest_stops_at_breakeven(monkeypatch):
+    s = _scale_settings(monkeypatch)
+    from engine import profit_manager
+    # bar 0 entry at 100; bar 1 reaches +1R (R = entry - 99); bar 2 falls through breakeven.
+    tape = _tape(_flat(W) + [(100, 100, 100, 100), (100, 101.2, 100, 101), (100.5, 100.5, 99.5, 99.6), *_flat(5)])
+    b = _book_with_stop(tape, W, 99.0, 110.0)
+    entry = b.entry
+    r = entry - 99.0
+    qty = b.qty
+    assert sim.step(tape, W + 1, b, Once(-1)) is None
+    assert b.pos["scaled_out"] and b.qty == qty - qty // 2
+    be = profit_manager.breakeven(entry)
+    assert b.pos["stop_loss"] == pytest.approx(round(be, 4))
+    t = sim.step(tape, W + 2, b, Once(-1))
+    assert t is not None and t.exit_reason == "stop"
+    sold = qty // 2
+    level = entry + s.SCALE_OUT_AT_R * r
+    expect = sold * (COSTS.sell_fill(level) - entry) + (qty - sold) * (COSTS.sell_fill(round(be, 4)) - entry)
+    assert t.pnl == pytest.approx(expect, abs=1e-3)
+    assert t.qty == qty                      # the trade reports the whole position
+
+
+def test_a_bar_that_touches_the_stop_and_plus_1r_is_a_loss(monkeypatch):
+    _scale_settings(monkeypatch)
+    tape = _tape(_flat(W) + [(100, 100, 100, 100), (100, 101.5, 98.5, 100), *_flat(5)])
+    b = _book_with_stop(tape, W, 99.0, 110.0)
+    t = sim.step(tape, W + 1, b, Once(-1))
+    assert t is not None and t.exit_reason == "stop" and not b.pos.get("scaled_out")
+
+
+def test_trailing_stop_follows_the_high_after_the_scale_out(monkeypatch):
+    _scale_settings(monkeypatch)
+    tape = _tape(_flat(W) + [(100, 100, 100, 100), (100, 101.2, 100, 101), (101, 103, 101, 103), *_flat(5, 103)])
+    b = _book_with_stop(tape, W, 99.0, 110.0)
+    r = b.entry - 99.0
+    sim.step(tape, W + 1, b, Once(-1))
+    sim.step(tape, W + 2, b, Once(-1))
+    assert b.pos["stop_loss"] == pytest.approx(round(103 - r, 4))   # 1R behind the new high
+
+
+def test_no_scale_out_when_it_would_leave_no_share(monkeypatch):
+    _scale_settings(monkeypatch)
+    tape = _tape(_flat(W) + [(100, 100, 100, 100), (100, 101.2, 100, 101), *_flat(5, 101)])
+    b = _book_with_stop(tape, W, 99.0, 110.0, notional=150.0)      # one share
+    sim.step(tape, W + 1, b, Once(-1))
+    assert b.qty == 1 and b.pos["scaled_out"] and b.realized == 0.0
+
+
+def test_profit_taking_off_leaves_the_stop_alone(monkeypatch):
+    s = _scale_settings(monkeypatch)
+    monkeypatch.setattr(s, "PROFIT_TAKING_ENABLED", False)
+    tape = _tape(_flat(W) + [(100, 100, 100, 100), (100, 101.2, 100, 101), *_flat(5, 101)])
+    b = _book_with_stop(tape, W, 99.0, 110.0)
+    sim.step(tape, W + 1, b, Once(-1))
+    assert b.pos["stop_loss"] == 99.0 and not b.pos.get("scaled_out")

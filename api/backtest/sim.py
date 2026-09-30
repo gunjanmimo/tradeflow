@@ -17,6 +17,13 @@ The exit rules are the live sentinel's (engine/sentinel_agent.py), in its order:
              last bar.
   strategy   the strategy's evaluate_exit at a bar's close; fills at the next
              bar's open.
+  scale-out  engine/profit_manager.py, as the live executor runs it: when the
+             bar's high reaches +SCALE_OUT_AT_R, SCALE_OUT_FRACTION of the shares
+             (whole shares, one left at least) are sold at that level as a market
+             order, and the stop moves to breakeven. Checked after the stop, so a
+             bar that touches both is a loss.
+  trail      after the scale-out, profit_manager.plan at each bar's close raises
+             the stop behind the high; the new stop holds from the next bar.
 
 Entries: the strategy's evaluate_entry at a bar's close; the market order fills
 at the NEXT bar's open, so no signal trades on its own bar. Every market fill
@@ -36,7 +43,7 @@ import numpy as np
 from core.config import settings
 from core.costs import CostModel
 from core.state import state, QuantMetrics, SentimentRecord
-from engine import brackets
+from engine import brackets, profit_manager
 from engine.quant_matrix import QuantMatrix
 from engine.strategies.base import StrategyContext
 from engine.strategies.indicators import PriceSeries
@@ -147,12 +154,20 @@ class Book:
         ctx = tape.ctx(max(i - 1, 0))
         stop, tp, _ = brackets.derive(fill, ctx.quant.atr)
         self.pos: Dict[str, Any] = {"symbol": tape.symbol, "qty": self.qty, "avg_entry_price": fill,
-                                    "stop_loss": stop, "take_profit": tp,
+                                    "stop_loss": stop, "take_profit": tp, "initial_stop": stop,
                                     "opened_at": float(tape.minute[i] * 60), "entry_strategy": strat_name}
         self.highest = fill
         self.trade = Trade(tape.symbol, strat_name, int(tape.minute[i]), entry_price=fill, qty=self.qty)
         self.trade.costs += self.qty * (fill - mid)
         self.pending_exit: Optional[str] = None
+        self.realized = 0.0            # P&L of shares already sold by a scale-out
+
+    def sell_part(self, qty: float, price: float):
+        fill = self.t.costs.sell_fill(price)
+        self.trade.costs += qty * (price - fill)
+        self.realized += (fill - self.entry) * qty
+        self.qty -= qty
+        self.pos["qty"] = self.qty
 
     @property
     def entry(self) -> float:
@@ -163,7 +178,7 @@ class Book:
         self.trade.costs += self.qty * (price - fill)
         self.trade.exit_minute = int(self.t.minute[i])
         self.trade.exit_price = fill
-        self.trade.pnl = round((fill - self.entry) * self.qty, 4)
+        self.trade.pnl = round(self.realized + (fill - self.entry) * self.qty, 4)
         self.trade.exit_reason = reason
         return self.trade
 
@@ -185,6 +200,7 @@ def step(tape: Tape, i: int, b: Book, strat) -> Optional[Trade]:
         return b.close(i, o, "target (gap)", market=False)
     if h >= tp:
         return b.close(i, tp, "target", market=False)
+    take_profit(b, o, h, c)
     b.highest = max(b.highest, h)
 
     if tape.day_last[i]:
@@ -206,6 +222,30 @@ def step(tape: Tape, i: int, b: Book, strat) -> Optional[Trade]:
     if ex is not None and ex.should_close:
         b.pending_exit = f"strategy: {ex.reason[:60]}"
     return None
+
+
+def take_profit(b: Book, o: float, h: float, c: float):
+    """The live scale-out and trailing stop (engine/profit_manager.py) on one bar."""
+    pos = b.pos
+    r = profit_manager.risk_per_share(pos)
+    if not settings.PROFIT_TAKING_ENABLED or r <= 0:
+        return
+    if not pos.get("scaled_out"):
+        level = max(b.entry + settings.SCALE_OUT_AT_R * r, o)
+        if h < level:
+            return
+        act = profit_manager.plan(pos, level, max(b.highest, level))
+        if not act or act["type"] != "scale_out":
+            return
+        sold = math.floor(b.qty * act["fraction"])
+        if sold >= 1 and b.qty - sold >= 1:        # as executor._scale_out
+            b.sell_part(sold, level)
+        pos["scaled_out"] = True
+        pos["stop_loss"] = act["new_stop"]
+        return
+    act = profit_manager.plan(pos, c, max(b.highest, h))
+    if act and act["type"] == "raise_stop":
+        pos["stop_loss"] = act["new_stop"]
 
 
 def run(tape: Tape, strat, notional: float) -> List[Trade]:
