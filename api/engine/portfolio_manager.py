@@ -173,7 +173,11 @@ class PortfolioManager:
                 skip("near close", "too close to the market close")
                 continue
             if tick is None:
-                skip("no price", "no price yet")
+                from feeds.alpaca_stream import market_stream
+                if sym in market_stream.not_streamed:
+                    skip("not streamed (data plan full)", "not streamed: data plan symbol limit")
+                else:
+                    skip("no price", "no price yet")
                 continue
             if row["tick_age_s"] > settings.MANAGER_MAX_TICK_AGE_SECONDS:
                 skip("feed silent", "price feed silent")

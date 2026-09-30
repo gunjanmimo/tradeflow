@@ -266,6 +266,13 @@ class Settings(BaseSettings):
     # Streamed and backfilled for market context (the policy reads SPY), never traded
     # unless also on the watchlist.
     CONTEXT_SYMBOLS: tuple = ("SPY",)
+    # Most symbols the live data stream subscribes at once. Alpaca's free (IEX)
+    # data plan allows 30; one over and Alpaca rejects the whole subscribe
+    # ("symbol limit exceeded (405)"), leaving EVERY symbol without a price. The
+    # stream keeps held positions first, then CONTEXT_SYMBOLS, then the watchlist
+    # by scout rank; the rest show "not streamed" and are not entered.
+    # Raise it only with a paid data plan.
+    STREAM_MAX_SYMBOLS: int = 30
     RL_GATE_MIN_T: float = 2.0          # test-set t-stat a policy needs to be approved
     # Learner agent: after each close, retrain on the newest data (warm start)
     # and deploy the result only if it beats the current policy on the same days.

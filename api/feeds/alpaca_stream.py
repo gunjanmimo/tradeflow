@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import random
+import re
 import time
 from typing import Dict, Optional
 from core.config import settings
@@ -27,6 +28,9 @@ class MarketStreamRunner:
         self._stock_trade_handler = None
         self._stock_quote_handler = None
         self._stock_task = None
+        self._sync_lock = asyncio.Lock()
+        # Watched symbols left off the live stream by STREAM_MAX_SYMBOLS.
+        self.not_streamed: set = set()
 
     async def start(self):
         self._running = True
@@ -46,24 +50,92 @@ class MarketStreamRunner:
         if getattr(self, "_sync_task", None):
             self._sync_task.cancel()
 
+    def _held(self) -> set:
+        return set(state.active_positions) | set(executor.pending_orders)
+
+    def plan(self) -> list:
+        """
+        The symbols the live stream should carry, most important first, capped at
+        settings.STREAM_MAX_SYMBOLS: held positions (their stops and targets run
+        on it), then the context symbols, then the watchlist by scout rank
+        (unranked ones after, alphabetically).
+        """
+        try:
+            from scout.service import scout
+            rank = {s: p.get("rank") for s, p in scout.picks.items()}
+        except Exception:
+            rank = {}
+        watch = sorted(state.watchlist, key=lambda s: (rank.get(s) is None, rank.get(s) or 0, s))
+        return stream_plan(sorted(self._held()), settings.CONTEXT_SYMBOLS, watch,
+                           settings.STREAM_MAX_SYMBOLS)
+
     async def sync_subscriptions(self) -> list:
         """
-        Subscribes every watched, held or context symbol the live stream is not
-        streaming yet; returns the ones added. Symbols put on the watchlist before
-        the stream existed (the scout's first ranking runs at start-up) were
-        silently never subscribed and so never got a price.
+        Makes the live stream carry exactly plan(): unsubscribes what fell out of
+        it, then subscribes what is missing; returns the symbols whose bars were
+        added. Symbols put on the watchlist before the stream existed (the scout's
+        first ranking runs at start-up) were silently never subscribed and so
+        never got a price. Symbols were also never unsubscribed, so a long
+        session crept past the data plan's symbol limit -- and Alpaca rejects the
+        whole subscribe then, leaving EVERY symbol without a price.
         """
         if not (self._running and self._live) or self._stock_stream is None:
             return []
-        import re
-        bars = self._stock_stream._handlers.get("bars") or {}
-        want = set(state.watchlist) | set(state.active_positions) | set(settings.CONTEXT_SYMBOLS)
-        missing = sorted(s for s in want if s not in bars and re.match(r"^[A-Z]{1,5}(\.[A-Z])?$", s))
-        for sym in missing:
-            await self.ensure_stock_subscription(sym)
-        if missing:
-            logger.info(f"Subscribed live bars for {len(missing)} symbol(s) that had none: {', '.join(missing)}")
-        return missing
+        async with self._sync_lock:
+            return await self._reconcile(self._stock_stream)
+
+    async def _reconcile(self, stream) -> list:
+        plan = self.plan()
+        want = set(plan)
+        held = self._held() & want
+        wanted = {"bars": want, "quotes": want if self._stock_quote_handler else set(),
+                  "trades": held if self._stock_trade_handler else set()}
+        running = getattr(stream, "_running", False)
+        # Unsubscribe first, so the stream never holds more than the limit.
+        for channel, keep in wanted.items():
+            handlers = stream._handlers.get(channel)
+            gone = sorted(s for s in (handlers or {}) if s not in keep)
+            if not gone:
+                continue
+            if running:
+                try:
+                    await stream._send_unsubscribe_msg(channel, gone)
+                except Exception as e:
+                    logger.warning(f"Live {channel} unsubscribe for {', '.join(gone)} failed: {e}")
+            for s in gone:
+                handlers.pop(s, None)
+
+        handler_of = {"bars": self._stock_bar_handler, "quotes": self._stock_quote_handler,
+                      "trades": self._stock_trade_handler}
+        added = {}
+        for channel, keep in wanted.items():
+            handlers = stream._handlers.get(channel)
+            if handlers is None:
+                continue
+            added[channel] = [s for s in plan if s in keep and s not in handlers]
+            for s in added[channel]:
+                handlers[s] = handler_of[channel]
+        if running and any(added.values()):
+            try:
+                # Awaited directly: alpaca-py's public subscribe blocks on a
+                # future scheduled onto this same loop, which would deadlock.
+                await stream._send_subscribe_msg()
+            except Exception as e:
+                logger.warning(f"Live subscribe failed: {e}")
+        self._note_left_out(plan)
+        new_bars = sorted(added.get("bars", []))
+        if new_bars:
+            logger.info(f"Subscribed live bars for {len(new_bars)} symbol(s): {', '.join(new_bars)}")
+        return new_bars
+
+    def _note_left_out(self, plan: list):
+        """Records (and logs once per change) the watched symbols the cap left off the stream."""
+        left = set(state.watchlist) - set(plan)
+        if left != self.not_streamed and left:
+            state.log_event("STREAM", f"Live data plan full ({settings.STREAM_MAX_SYMBOLS} symbols): "
+                                      f"not streaming {', '.join(sorted(left))} (lowest ranked). "
+                                      "They get no price and cannot be entered.")
+        self.not_streamed = left
 
     async def _sync_loop(self):
         while self._running:
@@ -84,14 +156,11 @@ class MarketStreamRunner:
         """
         if not (self._running and self._live):
             return
-        stream = self._stock_stream
-        if stream is None:
+        if self._stock_stream is None:
             if self._stock_task is None or self._stock_task.done():
                 self._stock_task = asyncio.create_task(self._run_stock_live_feed())
             return
-        await self._subscribe(stream, "bars", symbol, self._stock_bar_handler)
-        if self._stock_quote_handler is not None:
-            await self._subscribe(stream, "quotes", symbol, self._stock_quote_handler)
+        await self.sync_subscriptions()
 
     async def ensure_position_stream(self, symbol: str):
         """
@@ -101,23 +170,9 @@ class MarketStreamRunner:
         """
         if not (self._running and self._live):
             return
-        stream = self._stock_stream
-        if stream is None or self._stock_trade_handler is None:
+        if self._stock_stream is None or self._stock_trade_handler is None:
             return  # the feed subscribes held positions itself when it starts
-        await self._subscribe(stream, "trades", symbol, self._stock_trade_handler)
-
-    async def _subscribe(self, stream, channel: str, symbol: str, handler):
-        handlers = stream._handlers.get(channel)
-        if handlers is None or symbol in handlers:
-            return
-        handlers[symbol] = handler
-        if getattr(stream, "_running", False):
-            try:
-                # Awaited directly: alpaca-py's public subscribe blocks on a
-                # future scheduled onto this same loop, which would deadlock.
-                await stream._send_subscribe_msg()
-            except Exception as e:
-                logger.warning(f"Live {channel} subscribe for {symbol} failed: {e}")
+        await self.sync_subscriptions()
 
     async def on_position_trade(self, symbol: str, price: float, is_trade: bool = True):
         """
@@ -291,16 +346,14 @@ class MarketStreamRunner:
                     pass
                 await self.on_position_trade(trade.symbol, float(trade.price))
 
-            held = list(state.active_positions)
-            for s in sorted(set(stocks) | set(held)):
-                stock_stream.subscribe_bars(handle_stock_bar, s)
-                stock_stream.subscribe_quotes(handle_stock_quote, s)
-            for s in held:
-                stock_stream.subscribe_trades(handle_stock_trade, s)
-            self._stock_stream = stock_stream
             self._stock_bar_handler = handle_stock_bar
             self._stock_trade_handler = handle_stock_trade
             self._stock_quote_handler = handle_stock_quote
+            # Not running yet: this only fills the handlers, which alpaca-py
+            # sends as its first subscribe once connected.
+            async with self._sync_lock:
+                await self._reconcile(stock_stream)
+            self._stock_stream = stock_stream
 
             await stock_stream._run_forever()
         except Exception as e:
@@ -349,6 +402,18 @@ class MarketStreamRunner:
             self._run_stock_live_feed(),
             self._run_premarket_quote_poller(),
         )
+
+_STOCK_SYMBOL = re.compile(r"^[A-Z]{1,5}(\.[A-Z])?$")
+
+
+def stream_plan(held, context, watch, limit: int) -> list:
+    """First `limit` distinct stock symbols of held, then context, then watch, in that order."""
+    out = []
+    for s in (*held, *context, *watch):
+        if s not in out and _STOCK_SYMBOL.match(s):
+            out.append(s)
+    return out[:max(int(limit), 0)]
+
 
 def usable_quote(bid: float, ask: float, ts: Optional[float], now: float) -> bool:
     """
