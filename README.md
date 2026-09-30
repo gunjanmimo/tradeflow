@@ -147,6 +147,8 @@ TradeFlow used to trade crypto and stocks on a stack of technical signals and ex
 | Accounting | A close was booked at the last mark, not at the fill, so fees and slippage never reached the budget or the loss halt. **Fixed:** re-booked at broker fills; the halt also reads broker equity. |
 | Exits | Selling half of any winner, delaying stops, and averaging into losers cut winners and let losers run. **Replaced** by one exit policy: stop, target, strategy exit, end of day. |
 | Signals | Across 43 large caps × 499 sessions, none of nine classic intraday signals (reversal, VWAP, RSI(2), gap fade, momentum, opening-range breakout, EMA cross…) clears a 6 bps round trip. The best gross edge is +6.8 bps/trade with t = 0.8. `python -m research edge` |
+| Published strategies | Two intraday strategies with published Sharpe ratios near 2.4, replayed long-only trade by trade on 43 stocks × 500 sessions (`python -m research papers`). **The 5-minute opening-range breakout on stocks in play** (Zarattini, Barbon & Aziz 2024) loses on the oldest 60% of sessions in every variant, and a placebo that buys at 09:35 on the same days without any breakout earns as much: the breakout adds nothing. **The SPY noise-area momentum** (Zarattini, Aziz & Barbon 2024) is negative on SPY, QQQ and the stocks. Neither is added. |
+| Profit-taking | Five exit rules on the same 1.7M backtest entries (4 strategies × 43 stocks × 500 sessions, `python -m backtest.exit_sweep`). Selling half earlier (+0.5R) is the **worst** rule in every strategy and on both halves of the data. The best, a breakeven stop at +0.5R without selling, is better by only ~0.1 bps per trade against a 6 bps round trip. With no edge in the entries, no exit rule makes them pay. |
 | PPO | The learner works: on synthetic markets it finds a planted edge (+170 to +255 bps/day on unseen days) and learns to **stay flat** when there is none. On real bars the best policy trades 0.27 times a day per stock and loses 1.3 bps/day on unseen days, against −5.3 for random trading at that rate and −11.6 for holding. **The gate refuses it**, so it runs in shadow mode. |
 
 This is a finding, not a failure: liquid large caps on one-minute price and volume features are close to efficient after costs. To find an edge, change the **information** (news, earnings events, order flow, less efficient names) or the **horizon** (overnight, multi-day). Changing the model won't do it. The pipeline is built to test exactly that kind of idea.
@@ -248,7 +250,7 @@ Measured in R, the trade's own initial risk (entry − initial stop):
 - The stop is held **at the broker**. Entries are real bracket orders, and after a scale-out or a stop raise an OCO (stop + target for the shares left) replaces the old legs. A check every 60 s gives any unprotected position one, so a restart or crash never leaves a position unguarded.
 - A partial sale takes the share count from the broker's live position, never from the engine's copy.
 
-Unlike the removed "harvest", which sold half on *any* uptick and cut winners short, nothing is sold before +1R. Settings: `PROFIT_TAKING_ENABLED`, `SCALE_OUT_AT_R`, `SCALE_OUT_FRACTION`, `TRAIL_DISTANCE_R` in `core/config.py`. The backtester does not model the scale-out yet.
+Unlike the removed "harvest", which sold half on *any* uptick and cut winners short, nothing is sold before +1R. Settings: `PROFIT_TAKING_ENABLED`, `SCALE_OUT_AT_R`, `SCALE_OUT_FRACTION`, `TRAIL_DISTANCE_R` in `core/config.py`. The backtester models the scale-out and the trailing stop; `python -m backtest.exit_sweep` compares exit rules on the same entries (see *Honest results*).
 
 </details>
 
@@ -287,10 +289,14 @@ curl -X POST localhost:8000/api/rl/retrain       # download new bars + warm-star
 ```bash
 python -m research edge --signals reversal_z,gap_fade --horizons 15,60,120
 python -m backtest --days 30 --symbols NVDA,AAPL --strategies supertrend,zscore_reversion
+python -m research papers                   # published intraday strategies, trade by trade
+python -m backtest.exit_sweep               # the same entries under five profit-taking rules
 ```
 
 - **`research edge`**: an event study per signal and horizon. Entry at the next open, no overlapping trades, no overnight holds, excess return over a random entry, t-statistics clustered by day, net of costs, with a chronological 40% holdout. Tests assert that no signal looks ahead.
-- **`backtest`**: replays any platform strategy through the live exit rules and reports gross edge per trade against costs per trade.
+- **`backtest`**: replays any platform strategy through the live exit rules, including the +1R scale-out and trailing stop, and reports gross edge per trade against costs per trade.
+- **`research papers`**: published strategies with path-dependent exits (`research/papers.py`), each against a placebo on the same days, with the oldest 60% and newest 40% of sessions reported separately and SPY-hedged returns.
+- **`backtest.exit_sweep`**: the same entries under each profit-taking rule; a rule has to win on both halves of the data.
 - The classic strategy library (`engine/strategies/library.py`: Bollinger, Connors RSI(2), z-score, VWAP, MACD, Supertrend, Donchian and others) is still available per symbol or as the default (`POST /api/strategies/class`). None of them shows an edge after costs on this data.
 
 </details>
@@ -394,7 +400,7 @@ Working on the code with Claude Code? [CLAUDE.md](CLAUDE.md) has the commands, g
 ## 📍 Roadmap
 
 - [ ] **Volatility-scaled stops:** size stops to each stock's normal range, not a flat 0.8% minimum.
-- [ ] **Model the +1R scale-out in the backtester,** so profit-taking is judged over many days.
+- [x] **Model the +1R scale-out in the backtester,** so profit-taking is judged over many days.
 - [ ] **An "Agents' thinking" panel:** live lean, odds and drivers for every watched stock (the backend is ready).
 - [ ] **A scorecard verdict:** do the scout's news and discussion signals beat the pool?
 - [ ] **RL training on discovered stocks** instead of a fixed research universe.

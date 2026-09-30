@@ -3,8 +3,11 @@
     python -m research download [--days 730] [--symbols AAPL,MSFT]
     python -m research edge [--signals reversal_z,vwap_dev] [--horizons 5,15,30,60]
                             [--half-spread-bps 2] [--slippage-bps 1]
+    python -m research papers [--half-spread-bps 2] [--slippage-bps 1]
 
-`edge` writes research/output/edge.md and edge.json.
+`edge` writes research/output/edge.md and edge.json; `papers` (published
+intraday strategies replayed trade by trade, research/papers.py) writes
+research/output/papers.md.
 """
 import argparse
 import json
@@ -28,10 +31,13 @@ def main(argv=None):
     e.add_argument("--symbols", default="")
     e.add_argument("--half-spread-bps", type=float, default=None)
     e.add_argument("--slippage-bps", type=float, default=None)
+    pp = sub.add_parser("papers", help="replay published intraday strategies after costs")
+    pp.add_argument("--half-spread-bps", type=float, default=None)
+    pp.add_argument("--slippage-bps", type=float, default=None)
     a = ap.parse_args(argv)
 
     from research import data
-    syms = [s.strip().upper() for s in a.symbols.split(",") if s.strip()] if a.symbols else None
+    syms = [s.strip().upper() for s in a.symbols.split(",") if s.strip()] if getattr(a, "symbols", "") else None
 
     if a.cmd == "download":
         t0 = time.time()
@@ -43,6 +49,21 @@ def main(argv=None):
     from core import costs as costs_mod
     from research import edge, signals
     costs = costs_mod.parse(a.half_spread_bps, a.slippage_bps)
+    if a.cmd == "papers":
+        from research import papers
+        bars = data.load_many(data.available())
+        if not bars:
+            sys.exit("No cached bars. Run: python -m research download")
+        n_days = len({d for b in bars.values() for d in b.days().tolist()})
+        t0 = time.time()
+        report = papers.render(papers.study(bars, costs), costs,
+                               len([s for s in bars if s not in ("SPY", "QQQ")]), n_days)
+        os.makedirs(OUT_DIR, exist_ok=True)
+        with open(os.path.join(OUT_DIR, "papers.md"), "w") as f:
+            f.write(report)
+        print(report)
+        print(f"({time.time() - t0:.0f}s) wrote {OUT_DIR}/papers.md")
+        return
     names = [s.strip() for s in a.signals.split(",") if s.strip()] or list(signals.SIGNALS)
     bad = [n for n in names if n not in signals.SIGNALS]
     if bad:
